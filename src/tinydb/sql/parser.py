@@ -32,6 +32,7 @@ from typing import List, Optional
 
 from tinydb.errors import ParseError
 from tinydb.sql.ast import (
+    Aggregate,
     Assignment,
     BinaryOp,
     ColumnRef,
@@ -41,6 +42,7 @@ from tinydb.sql.ast import (
     Expr,
     Insert,
     Literal,
+    OrderBy,
     Select,
     Star,
     Statement,
@@ -304,6 +306,9 @@ class _Parser:
 
     # --- SELECT -----------------------------------------------------
 
+    # Aggregate function names that take a column or ``*`` argument.
+    _AGGREGATE_FUNCS: frozenset = frozenset({"COUNT", "SUM", "AVG", "MIN", "MAX"})
+
     def _parse_select(self) -> Select:
         self._expect_keyword("SELECT")
         columns = self._parse_select_columns()
@@ -312,20 +317,108 @@ class _Parser:
         where: Optional[Expr] = None
         if self._match_keyword("WHERE"):
             where = self.parse_expr()
+        # GROUP BY <cols>
+        group_by: tuple = ()
+        if self._match_keyword("GROUP"):
+            self._expect_keyword("BY")
+            group_by = self._parse_ident_list()
+        # ORDER BY <col> [ASC|DESC] [, ...]
+        order_by: tuple = ()
+        if self._match_keyword("ORDER"):
+            self._expect_keyword("BY")
+            order_by = self._parse_order_by_list()
+        # LIMIT n [OFFSET m]
+        limit: Optional[int] = None
+        offset: Optional[int] = None
+        if self._match_keyword("LIMIT"):
+            limit = self._expect_kind(TokenKind.INT_LIT).value
+            if self._match_keyword("OFFSET"):
+                offset = self._expect_kind(TokenKind.INT_LIT).value
         # Optional trailing semicolon.
         self._match_kind(TokenKind.SEMI)
-        return Select(columns=columns, table=table_tok.value, where=where)
+        return Select(
+            columns=columns,
+            table=table_tok.value,
+            where=where,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            group_by=group_by,
+        )
 
     def _parse_select_columns(self) -> tuple:
-        """Either ``*`` (Star sentinel) or one-or-more comma-separated exprs."""
+        """Either ``*`` (Star sentinel) or one-or-more comma-separated items."""
         tok = self._peek()
         if tok.kind is TokenKind.OP and tok.value == "*":
             self._advance()
             return (Star(),)
-        cols = [self.parse_expr()]
+        cols = [self._parse_select_item()]
         while self._match_kind(TokenKind.COMMA):
-            cols.append(self.parse_expr())
+            cols.append(self._parse_select_item())
         return tuple(cols)
+
+    def _parse_select_item(self) -> Expr:
+        """One column-list entry: aggregate function or arbitrary expr."""
+        tok = self._peek()
+        if (
+            tok.kind is TokenKind.KEYWORD
+            and tok.value in self._AGGREGATE_FUNCS
+        ):
+            return self._parse_aggregate()
+        return self.parse_expr()
+
+    def _parse_aggregate(self) -> Aggregate:
+        """``FUNC '(' ( '*' | IDENT ) ')'`` — e.g. ``COUNT(*)``, ``SUM(amount)``."""
+        func_tok = self._expect_keyword_one_of(self._AGGREGATE_FUNCS)
+        self._expect_kind(TokenKind.LPAREN)
+        arg_tok = self._peek()
+        if arg_tok.kind is TokenKind.OP and arg_tok.value == "*":
+            self._advance()
+            column = "*"
+        elif arg_tok.kind is TokenKind.IDENT:
+            self._advance()
+            column = arg_tok.value
+        else:
+            raise ParseError(
+                arg_tok.line, arg_tok.col,
+                f"expected column name or '*' inside aggregate, got "
+                f"{arg_tok.kind.name} {arg_tok.value!r}",
+            )
+        self._expect_kind(TokenKind.RPAREN)
+        return Aggregate(func=func_tok.value, column=column)
+
+    def _parse_order_by_list(self) -> tuple:
+        items = [self._parse_order_by_item()]
+        while self._match_kind(TokenKind.COMMA):
+            items.append(self._parse_order_by_item())
+        return tuple(items)
+
+    def _parse_order_by_item(self) -> OrderBy:
+        col_tok = self._expect_ident()
+        descending = False
+        if self._match_keyword("DESC"):
+            descending = True
+        elif self._match_keyword("ASC"):
+            descending = False  # explicit ASC; default already False
+        return OrderBy(column=col_tok.value, descending=descending)
+
+    def _parse_ident_list(self) -> tuple:
+        """Comma-separated IDENT list — used by GROUP BY and similar."""
+        cols = [self._expect_ident().value]
+        while self._match_kind(TokenKind.COMMA):
+            cols.append(self._expect_ident().value)
+        return tuple(cols)
+
+    def _expect_keyword_one_of(self, choices: frozenset) -> Token:
+        """Consume a KEYWORD whose value is in ``choices``; raise otherwise."""
+        tok = self._peek()
+        if tok.kind is not TokenKind.KEYWORD or tok.value not in choices:
+            raise ParseError(
+                tok.line, tok.col,
+                f"expected one of {sorted(choices)}, got "
+                f"{tok.kind.name} {tok.value!r}",
+            )
+        return self._advance()
 
     # --- UPDATE -----------------------------------------------------
 
