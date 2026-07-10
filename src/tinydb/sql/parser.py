@@ -53,7 +53,7 @@ from tinydb.sql.ast import (
     UnaryOp,
     Update,
 )
-from tinydb.sql.tokens import Token, TokenKind
+from tinydb.sql.tokens import Token, TokenKind, tokenize
 from tinydb.types.system import Column, TypeTag, parse_type_name
 
 
@@ -111,6 +111,10 @@ class _Parser:
 
     def _at_end(self) -> bool:
         return self._peek().kind is TokenKind.EOF
+
+    def position(self) -> int:
+        """Current cursor index (number of tokens already consumed)."""
+        return self._pos
 
     # --- expect / match (raise on mismatch) --------------------------
 
@@ -672,6 +676,19 @@ class _Parser:
 
 
 # --- public entry point -------------------------------------------------
+#
+# Three layers, each tested independently:
+#
+# 1. ``parse_ddl(tokens)`` / ``parse_dml(tokens)`` — token-list entry
+#    points used by callers that already ran the lexer themselves.
+# 2. ``parse_ddl_string(sql)`` / ``parse_dml_string(sql)`` — string
+#    wrappers around (1) for callers that want a one-shot API.
+# 3. ``parse(sql)`` — top-level dispatcher that lexes once and routes
+#    on the leading keyword to either ``parse_ddl_string`` or
+#    ``parse_dml_string``.
+#
+# All three layers raise :class:`ParseError` with the offending
+# token's 1-indexed line / column (REQ-SQL-7).
 
 
 def parse_ddl(tokens: List[Token]) -> Statement:
@@ -683,6 +700,16 @@ def parse_ddl(tokens: List[Token]) -> Statement:
     and column on any syntactic error.
     """
     return _Parser(tokens).parse_ddl()
+
+
+def parse_dml(tokens: List[Token]) -> Statement:
+    """Parse a token stream as a DML statement (INSERT/SELECT/UPDATE/DELETE).
+
+    Returns an :class:`Insert`, :class:`Select`, :class:`Update`, or
+    :class:`Delete` AST node.  Raises :class:`ParseError` with the
+    offending token's line / column on any syntactic error.
+    """
+    return _Parser(tokens).parse_dml()
 
 
 def parse_expr(tokens: List[Token]) -> Expr:
@@ -704,14 +731,76 @@ def parse_expr(tokens: List[Token]) -> Expr:
     return expr
 
 
-def parse_dml(tokens: List[Token]) -> Statement:
-    """Parse a token stream as a DML statement (INSERT/SELECT/UPDATE/DELETE).
+# Leading keywords that mark a statement as DDL — used by ``parse()``
+# to auto-dispatch.  Kept as a module-level frozenset so the dispatch
+# is a single set membership check rather than a chain of ``==``.
+_DDL_LEAD_KEYWORDS: frozenset = frozenset({"CREATE", "DROP"})
 
-    Returns an :class:`Insert`, :class:`Select`, :class:`Update`, or
-    :class:`Delete` AST node.  Raises :class:`ParseError` with the
-    offending token's line / column on any syntactic error.
+
+def parse_ddl_string(sql: str) -> Statement:
+    """Lex + parse a raw SQL string as a DDL statement.
+
+    Thin wrapper around :func:`tokenize` + :func:`parse_ddl` for callers
+    that already hold the raw source.  All parse errors still carry the
+    original 1-indexed line / column of the offending token (REQ-SQL-7).
     """
-    return _Parser(tokens).parse_dml()
+    return parse_ddl(tokenize(sql))
 
 
-__all__ = ["parse_ddl", "parse_dml", "parse_expr"]
+def parse_dml_string(sql: str) -> Statement:
+    """Lex + parse a raw SQL string as a DML statement.
+
+    Thin wrapper around :func:`tokenize` + :func:`parse_dml`.
+    """
+    return parse_dml(tokenize(sql))
+
+
+def parse(sql: str) -> Statement:
+    """Lex + parse a raw SQL string, auto-dispatching DDL vs DML.
+
+    Reads the leading keyword to pick the right grammar:
+
+    * ``CREATE`` / ``DROP``   → DDL parser
+    * ``INSERT`` / ``SELECT`` / ``UPDATE`` / ``DELETE`` → DML parser
+
+    Anything else raises :class:`~tinydb.errors.ParseError` with the
+    offending position.  This is the public entry point most callers
+    should use — only reach for :func:`parse_ddl_string` /
+    :func:`parse_dml_string` directly when you already know the
+    statement kind (or want to reject the other kind up front).
+
+    v0.1 accepts a single statement per call; any non-EOF token after
+    the parsed statement is reported as a parse error so callers can
+    spot typos like ``SELECT * FROM t LIMOT 10`` (missing keyword
+    would otherwise be silently swallowed by SELECT's permissive
+    clause-omission logic).
+    """
+    tokens = tokenize(sql)
+    first = tokens[0]
+    if first.kind is TokenKind.KEYWORD and first.value in _DDL_LEAD_KEYWORDS:
+        parser = _Parser(tokens)
+        stmt = parser.parse_ddl()
+    else:
+        parser = _Parser(tokens)
+        stmt = parser.parse_dml()
+    # After the dispatched parser returns, the cursor sits just before
+    # any trailing tokens (if the source contained more than one
+    # statement or trailing garbage).  Position is 1-based in the error
+    # path — token at parser.position() is the first un-consumed.
+    if parser.position() < len(tokens) - 1:
+        tok = tokens[parser.position()]
+        raise ParseError(
+            tok.line, tok.col,
+            f"unexpected trailing token {tok.kind.name} {tok.value!r}",
+        )
+    return stmt
+
+
+__all__ = [
+    "parse",
+    "parse_ddl",
+    "parse_dml",
+    "parse_expr",
+    "parse_ddl_string",
+    "parse_dml_string",
+]

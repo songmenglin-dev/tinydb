@@ -38,11 +38,38 @@ class ParseError(TinydbError):
         Human-readable description of the failure.
     """
 
+    # Maximum source line length copied verbatim into a snippet.  Lines
+    # longer than this are truncated so that the error message stays
+    # readable regardless of how far the user has wandered horizontally.
+    _SNIPPET_LINE_MAX: int = 120
+
     def __init__(self, line: int, col: int, msg: str) -> None:
         self.line = line
         self.col = col
         self.msg = msg
         super().__init__(f"line {line}, col {col}: {msg}")
+
+    def snippet(self, source: str) -> str:
+        """Return a human-friendly two-line excerpt of ``source``.
+
+        Line 1: the offending source line (truncated past
+        ``_SNIPPET_LINE_MAX`` characters).
+        Line 2: a caret (``^``) anchored at the offending column.
+
+        Useful for CLI error output; raises no error if ``line`` /
+        ``col`` fall past end-of-source (defensive: lexer / parser
+        positions are usually in-bounds but the snippet helper must
+        never crash on its own).
+        """
+        lines = source.splitlines()
+        if self.line < 1 or self.line > len(lines):
+            return f"line {self.line}, col {self.col}: {self.msg}"
+        text = lines[self.line - 1]
+        if len(text) > self._SNIPPET_LINE_MAX:
+            text = text[: self._SNIPPET_LINE_MAX - 1] + "…"
+        # 1-indexed col → 0-indexed caret offset; clamp to line length.
+        caret_col = max(0, min(self.col - 1, len(text)))
+        return f"{text}\n{' ' * caret_col}^"
 
 
 class ConstraintViolation(TinydbError):
