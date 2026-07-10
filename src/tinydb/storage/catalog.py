@@ -1,12 +1,22 @@
-"""Table catalog — persists schemas into reserved page 1.
+"""Table catalog — persists schemas into reserved page 1, indexes
+into reserved page 2.
 
 REQ coverage
 ------------
 * REQ-STO-6 — every ``CREATE TABLE`` writes the schema to the catalog
   page; ``DROP TABLE`` removes it; schemas survive a process restart.
+* REQ-IDX-6 — index metadata (name, table, columns, root_pid, unique)
+  is persisted into the catalog and survives a process restart.
 
-Layout of reserved page 1
--------------------------
+Layout of reserved pages
+------------------------
+* Page 1 (catalog) — table schemas (see entry shape below).
+* Page 2 (indexes) — index metadata (see entry shape below).
+* Page 3 is reserved for future catalog extensions (B-trees of large
+  indexes would land here once index metadata exceeds one page).
+
+Page 1 / page 2 layout
+~~~~~~~~~~~~~~~~~~~~~~
 ::
 
     +-------------------+ offset 0
@@ -25,7 +35,7 @@ Layout of reserved page 1
     | free space                   |
     +------------------------------+ PAGE_SIZE
 
-Each entry's JSON payload::
+Each table entry's JSON payload::
 
     {
       "table_id": 1,
@@ -37,10 +47,20 @@ Each entry's JSON payload::
       ]
     }
 
+Each index entry's JSON payload::
+
+    {
+      "name": "idx_users_email",
+      "table": "users",
+      "columns": ["email"],
+      "root_pid": 4,
+      "unique": false
+    }
+
 ``Heap`` instances are constructed by the executor using ``heap_pid``
-from the catalog.  v0.1 compacts the page on every ``drop_table`` —
-re-writing the live list is acceptable because the table count is small
-in a teaching database.
+from the catalog.  v0.1 compacts the page on every ``drop_table`` /
+``drop_index`` — re-writing the live list is acceptable because the
+table count is small in a teaching database.
 """
 
 from __future__ import annotations
@@ -48,16 +68,19 @@ from __future__ import annotations
 import json
 import struct
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import Iterable, List, Sequence, Tuple
 
 from tinydb.storage.heap import Heap
 from tinydb.storage.pager import PAGE_SIZE, Pager
 from tinydb.types.system import Column, TypeTag
 
-# Reserved page index used for the catalog.
+# Reserved page index used for the catalog tables.
 CATALOG_PAGE: int = 1
 
-# Page layout for catalog storage.
+# Reserved page index used for the catalog index metadata (REQ-IDX-6).
+INDEX_CATALOG_PAGE: int = 2
+
+# Page layout for catalog storage (shared by both pages).
 CATALOG_HEADER_SIZE: int = 12
 CATALOG_MAGIC: bytes = b"CATL"
 _CATALOG_COUNT_STRUCT = struct.Struct("<H")
@@ -89,6 +112,24 @@ class TableMeta:
     name: str
     columns: Tuple[Column, ...]
     heap_pid: int
+
+
+@dataclass(frozen=True, slots=True)
+class IndexMeta:
+    """Immutable description of a single B-tree index.
+
+    Persisted into the catalog so indexes survive a process restart
+    (REQ-IDX-6).  ``root_pid`` is the page id of the index's root
+    node; ``columns`` is the ordered list of indexed columns and
+    ``unique`` indicates whether the index enforces a UNIQUE
+    constraint.
+    """
+
+    name: str
+    table: str
+    columns: Tuple[str, ...]
+    root_pid: int
+    unique: bool
 
 
 # --- serialisation helpers ----------------------------------------------
@@ -136,21 +177,49 @@ def _deserialize_meta(blob: bytes) -> TableMeta:
     )
 
 
+# --- index-meta (de)serialisation (REQ-IDX-6) -------------------------
+
+
+def _serialize_index_meta(meta: IndexMeta) -> bytes:
+    payload = {
+        "name": meta.name,
+        "table": meta.table,
+        "columns": list(meta.columns),
+        "root_pid": int(meta.root_pid),
+        "unique": bool(meta.unique),
+    }
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+def _deserialize_index_meta(blob: bytes) -> IndexMeta:
+    d = json.loads(blob.decode("utf-8"))
+    return IndexMeta(
+        name=d["name"],
+        table=d["table"],
+        columns=tuple(d["columns"]),
+        root_pid=int(d["root_pid"]),
+        unique=bool(d.get("unique", False)),
+    )
+
+
 # --- Catalog ----------------------------------------------------------
 
 
 class Catalog:
-    """In-memory + on-disk (page 1) registry of tables.
+    """In-memory + on-disk (page 1 + page 2) registry of tables and indexes.
 
-    Thread-safety: not thread-safe — matches the v0.1 single-writer
-    fence.
+    Page 1 holds table schemas; page 2 holds index metadata
+    (REQ-IDX-6).  Thread-safety: not thread-safe — matches the v0.1
+    single-writer fence.
     """
 
     def __init__(self, pager: Pager) -> None:
         self._pager = pager
         self._by_name: "dict[str, TableMeta]" = {}
+        self._index_by_name: "dict[str, IndexMeta]" = {}
         self._next_table_id: int = 1
         self._load_from_disk()
+        self._load_indexes_from_disk()
 
     # -- persistence -----------------------------------------------------
 
@@ -177,6 +246,25 @@ class Catalog:
                 max_seen_id = meta.table_id
         self._next_table_id = max_seen_id + 1
 
+    def _load_indexes_from_disk(self) -> None:
+        """Load index metadata from page 2; no-op if page is uninitialised."""
+        page = bytes(self._pager.read_page(INDEX_CATALOG_PAGE))
+        if page[0:4] != CATALOG_MAGIC:
+            return
+        (count,) = _CATALOG_COUNT_STRUCT.unpack_from(page, 4)
+        offset = CATALOG_HEADER_SIZE
+        for _ in range(count):
+            if offset + 2 > PAGE_SIZE:
+                break
+            (entry_len,) = _CATALOG_ENTRY_LEN_STRUCT.unpack_from(page, offset)
+            offset += 2
+            if entry_len == 0 or offset + entry_len > PAGE_SIZE:
+                break
+            blob = bytes(page[offset : offset + entry_len])
+            offset += entry_len
+            meta = _deserialize_index_meta(blob)
+            self._index_by_name[meta.name] = meta
+
     def _persist(self) -> None:
         """Rewrite page 1 with the current live list (compact on save)."""
         page = bytearray(PAGE_SIZE)
@@ -199,6 +287,29 @@ class Catalog:
             offset += entry_len
         _CATALOG_CONTENT_END_STRUCT.pack_into(page, 6, offset)
         self._pager.write_page(CATALOG_PAGE, bytes(page))
+
+    def _persist_indexes(self) -> None:
+        """Rewrite page 2 with the current live index list (compact on save)."""
+        page = bytearray(PAGE_SIZE)
+        page[0:4] = CATALOG_MAGIC
+        _CATALOG_COUNT_STRUCT.pack_into(
+            page, 4, len(self._index_by_name)
+        )
+        offset = CATALOG_HEADER_SIZE
+        # Stable order: sort by name for deterministic on-disk layout.
+        for meta in sorted(self._index_by_name.values(), key=lambda m: m.name):
+            blob = _serialize_index_meta(meta)
+            entry_len = len(blob)
+            if offset + 2 + entry_len > PAGE_SIZE:
+                # Out of room — same policy as the table catalog: we
+                # stop, leaving the live in-memory state authoritative.
+                break
+            _CATALOG_ENTRY_LEN_STRUCT.pack_into(page, offset, entry_len)
+            offset += 2
+            page[offset : offset + entry_len] = blob
+            offset += entry_len
+        _CATALOG_CONTENT_END_STRUCT.pack_into(page, 6, offset)
+        self._pager.write_page(INDEX_CATALOG_PAGE, bytes(page))
 
     # -- public API ------------------------------------------------------
 
@@ -257,5 +368,90 @@ class Catalog:
         """Return a list of all live table names (sorted)."""
         return sorted(self._by_name)
 
+    # -- index API (REQ-IDX-6) -------------------------------------------
 
-__all__ = ["CATALOG_PAGE", "Catalog", "TableId", "TableMeta"]
+    def create_index(
+        self,
+        name: str,
+        table: str,
+        columns: Sequence[str],
+        root_pid: int,
+        unique: bool = False,
+    ) -> IndexMeta:
+        """Register a new index in the catalog.
+
+        The caller is responsible for allocating ``root_pid`` (typically
+        via :meth:`Pager.allocate_page`) so the catalog does not depend
+        on the B-tree layer.  Columns must be a non-empty sequence of
+        column names that exist in the table.
+
+        Raises :class:`ValueError` on a duplicate name or empty
+        ``columns``; :class:`KeyError` if ``table`` is not registered.
+        """
+        if name in self._index_by_name:
+            raise ValueError(f"index {name!r} already exists")
+        if table not in self._by_name:
+            raise KeyError(table)
+        cols = tuple(columns)
+        if not cols:
+            raise ValueError("index must reference at least one column")
+        meta = IndexMeta(
+            name=name,
+            table=table,
+            columns=cols,
+            root_pid=int(root_pid),
+            unique=bool(unique),
+        )
+        self._index_by_name[name] = meta
+        self._persist_indexes()
+        return meta
+
+    def drop_index(self, name: str) -> IndexMeta:
+        """Remove an index by name.
+
+        Returns the removed :class:`IndexMeta` so callers can free the
+        B-tree pages.  Raises :class:`KeyError` if the index does not
+        exist.
+        """
+        if name not in self._index_by_name:
+            raise KeyError(name)
+        meta = self._index_by_name.pop(name)
+        self._persist_indexes()
+        return meta
+
+    def get_index(self, name: str) -> IndexMeta:
+        """Return the :class:`IndexMeta` for ``name``.
+
+        Raises :class:`KeyError` if no such index exists.
+        """
+        if name not in self._index_by_name:
+            raise KeyError(name)
+        return self._index_by_name[name]
+
+    def list_indexes(self, table: str | None = None) -> List[str]:
+        """Return a list of all live index names (sorted).
+
+        When ``table`` is provided, only indexes for that table are
+        returned (still sorted).
+        """
+        if table is None:
+            return sorted(self._index_by_name)
+        return sorted(
+            name
+            for name, meta in self._index_by_name.items()
+            if meta.table == table
+        )
+
+    def all_indexes(self) -> Iterable[IndexMeta]:
+        """Iterate every live :class:`IndexMeta` (insertion order)."""
+        return list(self._index_by_name.values())
+
+
+__all__ = [
+    "CATALOG_PAGE",
+    "INDEX_CATALOG_PAGE",
+    "Catalog",
+    "IndexMeta",
+    "TableId",
+    "TableMeta",
+]

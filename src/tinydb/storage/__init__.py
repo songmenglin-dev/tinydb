@@ -9,7 +9,14 @@ Public surface (re-exported here for convenience)::
 """
 
 from tinydb.storage.buffer_pool import BufferPool
-from tinydb.storage.catalog import Catalog, TableId, TableMeta
+from tinydb.storage.catalog import (
+    CATALOG_PAGE,
+    INDEX_CATALOG_PAGE,
+    Catalog,
+    IndexMeta,
+    TableId,
+    TableMeta,
+)
 from tinydb.storage.free_space import FreeSpaceMap
 from tinydb.storage.heap import Heap, Rid
 from tinydb.storage.pager import MAGIC, PAGE_SIZE, Pager
@@ -20,6 +27,8 @@ __all__ = [
     "Catalog",
     "FreeSpaceMap",
     "Heap",
+    "INDEX_CATALOG_PAGE",
+    "IndexMeta",
     "MAGIC",
     "PAGE_SIZE",
     "Pager",

@@ -151,10 +151,13 @@ def _read_leaf_from_bytes(page: bytes, pid: int) -> LeafNode:
         keys.append(value)
         rids.append(Rid(page_id=page_id, slot_id=slot_id))
 
-    # NIT #1 fix: T-4.1 leaves were persisted with next_leaf_pid == 0;
-    # coerce to NO_NEXT once a split introduces siblings so chain walks
-    # don't dereference page 0.
-    if next_pid == 0 and key_count == 0:
+    # T-4.1 NIT #1 fix (addressed in T-4.6): always coerce a
+    # zero-valued next_leaf_pid to NO_NEXT.  T-4.1-era leaves were
+    # persisted with next_leaf_pid == 0; a split later introduces a
+    # sibling whose chain walk would dereference page 0 if we did not
+    # coerce.  We do this regardless of key_count so the contract is
+    # uniform across all reopen scenarios.
+    if next_pid == 0:
         next_pid = NO_NEXT
 
     return LeafNode(keys=keys, rids=rids, next_leaf_pid=next_pid)

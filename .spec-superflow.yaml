@@ -11,7 +11,7 @@ contract_hash: sha256:c96afb29d9ca7805419d037fb209dcd340a02eda24d4f86be7b99c155d
 
 # === Execution progress ===
 execution_mode: batch_inline
-batches_completed: 2
+batches_completed: 4
 test_result: null
 spec_merged: false
 
@@ -32,8 +32,8 @@ dp_2_result: approved: 4 artifacts passed (proposal + 61 REQ specs + 13 decision
 dp_2_timestamp: 2026-07-09T09:57:05Z
 dp_3_result: approved: 9 batches, 47 tasks, 13 design constraints, 5 escalation rules, 4 acceptance checks
 dp_3_timestamp: 2026-07-09T10:05:54Z
-dp_4_result: Batch Inline: B1+B2 closed in-line; B3 (SQL Parser, 7 sub-tasks, single module src/tinydb/sql/) stays Batch Inline — internal-only API surface, per-task TDD review covers risk. Escalation: B4+ (B-tree + executor + tx) cross-module → SDD.
-dp_4_timestamp: 2026-07-10T01:19:40Z
+dp_4_result: Batch 4 (B-tree Index) escalation: SDD mode active. T-4.1..T-4.6 cross storage + new index module + new public API (IndexManager). 6 tasks exceeds inlineThreshold=3; per-task implementer dispatch + per-task review. B3 (SQL Parser) closed in Batch Inline per prior dp_4_result.
+dp_4_timestamp: 2026-07-10T05:28:41Z
 dp_5_result: null
 dp_5_timestamp: null
 dp_6_result: null

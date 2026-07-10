@@ -7,16 +7,20 @@ pool, distinguished by a node-type byte at offset 0.
 Public surface (re-exported here for convenience)::
 
     from tinydb.index import (
-        BTreeIndex, BTreeOverflowError, InternalNode, LeafNode, NO_NEXT,
+        BTreeIndex, BTreeOverflowError, IndexManager, IndexMeta,
+        InternalNode, LeafNode, NO_NEXT,
     )
 """
 
 from tinydb.errors import BTreeOverflowError
 from tinydb.index.btree import BTreeIndex, InternalNode, LeafNode, NO_NEXT
+from tinydb.index.manager import IndexManager, IndexMeta
 
 __all__ = [
     "BTreeIndex",
     "BTreeOverflowError",
+    "IndexManager",
+    "IndexMeta",
     "InternalNode",
     "LeafNode",
     "NO_NEXT",
