@@ -28,12 +28,27 @@ head token so the caller can dispatch to a sibling parser.
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from tinydb.errors import ParseError
-from tinydb.sql.ast import CreateTable, DropTable, Statement
+from tinydb.sql.ast import (
+    BinaryOp,
+    ColumnRef,
+    CreateTable,
+    DropTable,
+    Expr,
+    Literal,
+    Statement,
+    UnaryOp,
+)
 from tinydb.sql.tokens import Token, TokenKind
 from tinydb.types.system import Column, parse_type_name
+
+
+# Operator sets used by the expression precedence ladder.
+_COMPARISON_OPS: frozenset = frozenset({"=", "!=", "<", "<=", ">", ">="})
+_ADDITIVE_OPS: frozenset = frozenset({"+", "-"})
+_MULTIPLICATIVE_OPS: frozenset = frozenset({"*", "/"})
 
 
 # --- cursor -------------------------------------------------------------
@@ -225,6 +240,143 @@ class _Parser:
         self._match_kind(TokenKind.SEMI)
         return DropTable(name=name_tok.value, if_exists=if_exists)
 
+    # --- expression parser (T-3.4a) --------------------------------
+    #
+    # Precedence ladder, lowest → highest:
+    #   OR  >  AND  >  NOT  >  comparison / IS [NOT] NULL  >
+    #   additive  >  multiplicative  >  unary-minus  >  primary
+    #
+    # Each level consumes one tighter level on the left/right and
+    # left-folds repeated same-precedence operators.
+
+    def parse_expr(self) -> Expr:
+        """Parse a full expression starting at the cursor."""
+        return self._parse_or()
+
+    def _parse_or(self) -> Expr:
+        left = self._parse_and()
+        while self._match_keyword("OR"):
+            right = self._parse_and()
+            left = BinaryOp(op="OR", left=left, right=right)
+        return left
+
+    def _parse_and(self) -> Expr:
+        left = self._parse_not()
+        while self._match_keyword("AND"):
+            right = self._parse_not()
+            left = BinaryOp(op="AND", left=left, right=right)
+        return left
+
+    def _parse_not(self) -> Expr:
+        if self._match_keyword("NOT"):
+            operand = self._parse_not()  # NOT is right-associative
+            return UnaryOp(op="NOT", operand=operand)
+        return self._parse_comparison()
+
+    def _parse_comparison(self) -> Expr:
+        left = self._parse_additive()
+        # IS [NOT] NULL — unary form, lives at the comparison level.
+        if self._match_keyword("IS"):
+            negated = self._match_keyword("NOT")
+            if not self._match_null():
+                tok = self._peek()
+                raise ParseError(
+                    tok.line, tok.col,
+                    f"expected NULL after IS, got {tok.kind.name} {tok.value!r}",
+                )
+            return UnaryOp(
+                op="IS NOT NULL" if negated else "IS NULL",
+                operand=left,
+            )
+        # Standard comparison operators (left-assoc within the level).
+        op = self._match_op_in(_COMPARISON_OPS)
+        if op is not None:
+            right = self._parse_additive()
+            return BinaryOp(op=op, left=left, right=right)
+        return left
+
+    def _parse_additive(self) -> Expr:
+        left = self._parse_multiplicative()
+        while True:
+            op = self._match_op_in(_ADDITIVE_OPS)
+            if op is None:
+                break
+            right = self._parse_multiplicative()
+            left = BinaryOp(op=op, left=left, right=right)
+        return left
+
+    def _parse_multiplicative(self) -> Expr:
+        left = self._parse_unary()
+        while True:
+            op = self._match_op_in(_MULTIPLICATIVE_OPS)
+            if op is None:
+                break
+            right = self._parse_unary()
+            left = BinaryOp(op=op, left=left, right=right)
+        return left
+
+    def _parse_unary(self) -> Expr:
+        # Unary minus is right-recursive so ``--x`` and ``-(a + b)`` work.
+        tok = self._peek()
+        if tok.kind is TokenKind.OP and tok.value == "-":
+            self._advance()
+            operand = self._parse_unary()
+            return UnaryOp(op="-", operand=operand)
+        return self._parse_primary()
+
+    def _parse_primary(self) -> Expr:
+        tok = self._peek()
+        # Literals — value already typed by the lexer.
+        if tok.kind is TokenKind.INT_LIT:
+            self._advance()
+            return Literal(value=tok.value)
+        if tok.kind is TokenKind.FLOAT_LIT:
+            self._advance()
+            return Literal(value=tok.value)
+        if tok.kind is TokenKind.STRING_LIT:
+            self._advance()
+            return Literal(value=tok.value)
+        if tok.kind is TokenKind.BOOL_LIT:
+            self._advance()
+            return Literal(value=tok.value)
+        if tok.kind is TokenKind.NULL_LIT:
+            self._advance()
+            return Literal(value=None)
+        # Parenthesised sub-expression.
+        if tok.kind is TokenKind.LPAREN:
+            self._advance()
+            inner = self.parse_expr()
+            self._expect_kind(TokenKind.RPAREN)
+            return inner
+        # IDENT — bare column or qualified ``t.col``.
+        if tok.kind is TokenKind.IDENT:
+            self._advance()
+            if self._match_kind(TokenKind.DOT):
+                col_tok = self._peek()
+                if col_tok.kind is not TokenKind.IDENT:
+                    raise ParseError(
+                        col_tok.line, col_tok.col,
+                        f"expected column name after '.', got "
+                        f"{col_tok.kind.name} {col_tok.value!r}",
+                    )
+                self._advance()
+                return ColumnRef(name=col_tok.value, table=tok.value)
+            return ColumnRef(name=tok.value)
+        raise ParseError(
+            tok.line, tok.col,
+            f"expected expression, got {tok.kind.name} {tok.value!r}",
+        )
+
+    # --- helpers ----------------------------------------------------
+
+    def _match_op_in(self, op_set: frozenset) -> Optional[str]:
+        """Consume and return a single-char/multi-char OP whose value is in op_set."""
+        tok = self._peek()
+        if tok.kind is TokenKind.OP and tok.value in op_set:
+            self._advance()
+            return tok.value
+        return None
+
 
 # --- public entry point -------------------------------------------------
 
@@ -240,4 +392,23 @@ def parse_ddl(tokens: List[Token]) -> Statement:
     return _Parser(tokens).parse_ddl()
 
 
-__all__ = ["parse_ddl"]
+def parse_expr(tokens: List[Token]) -> Expr:
+    """Parse a token stream as a single expression.
+
+    Consumes tokens up to (but not including) the trailing EOF.  Any
+    leftover non-EOF token raises :class:`ParseError` so callers can't
+    silently ignore trailing garbage.  The expression precedence ladder
+    is documented on :meth:`_Parser.parse_expr`.
+    """
+    parser = _Parser(tokens)
+    expr = parser.parse_expr()
+    if not parser._at_end():
+        tok = parser._peek()
+        raise ParseError(
+            tok.line, tok.col,
+            f"unexpected trailing token {tok.kind.name} {tok.value!r}",
+        )
+    return expr
+
+
+__all__ = ["parse_ddl", "parse_expr"]
