@@ -1,4 +1,4 @@
-"""B-tree index — leaves, internal nodes, split algorithm.
+"""B-tree index — leaves, internal nodes, split algorithm, delete + rebalance.
 
 The leaf / internal page layouts and (de)serialisers live in
 :mod:`tinydb.index.btree_leaf` and :mod:`tinydb.index.btree_internal`
@@ -7,7 +7,14 @@ respectively; this module owns the cross-cutting pieces:
 * :class:`BTreeIndex` — the public index class.  Holds the root page
   id and a lazy view of the root node (leaf or internal), runs
   inserts, splits on overflow, walks the tree for :meth:`search` and
-  :meth:`range`.
+  :meth:`range`, and removes entries with full rebalance on
+  :meth:`delete`.
+
+The split helpers (:func:`tinydb.index.btree_split.split_leaf`,
+:func:`~tinydb.index.btree_split.split_internal`) and the
+delete + rebalance helpers (:mod:`tinydb.index.btree_delete`) are
+extracted to dedicated modules to keep this file under the 400-line
+cap once both pieces landed.
 
 Page layout
 -----------
@@ -20,8 +27,8 @@ on-wire layouts below overlap in their use of offset 0..4.  See
 :mod:`tinydb.index.btree_leaf` and :mod:`tinydb.index.btree_internal`
 for the per-type detail.
 
-Deferred to later tasks: :meth:`BTreeIndex.delete` (T-4.4), composite
-keys (T-4.5), catalog integration (T-4.6).
+Deferred to later tasks: composite keys (T-4.5), catalog integration
+(T-4.6).
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ from tinydb.storage.heap import Rid
 from tinydb.storage.pager import Pager
 from tinydb.types.system import TypeTag
 
+from tinydb.index import btree_delete
 from tinydb.index.btree_internal import (
     InternalNode,
     _lower_bound,
@@ -45,6 +53,7 @@ from tinydb.index.btree_leaf import (
     _read_leaf_from_bytes,
     _write_leaf,
 )
+from tinydb.index.btree_split import split_internal, split_leaf
 
 # Sentinel: no sibling leaf / tail marker for the sibling chain.
 NO_NEXT: int = 0xFFFFFFFF
@@ -59,8 +68,24 @@ __all__ = [
     "BTreeOverflowError",
     "InternalNode",
     "LeafNode",
+    "MIN_INTERNAL_CHILDREN",
+    "MIN_INTERNAL_KEYS",
+    "MIN_LEAF_ENTRIES",
     "NO_NEXT",
+    "ORDER",
 ]
+
+# --- B-tree order constants (REQ-IDX-1 + design D-4) -------------------
+#
+# The on-disk layout permits up to 2N - 1 leaf entries and 2N internal
+# children before an overflow; the minimum occupancy after a delete is
+# N - 1 leaf entries / N internal children.  These constants are
+# exposed as module globals and re-exported as class attributes on
+# :class:`BTreeIndex` so callers (and tests) can reference them by name.
+ORDER: int = 64
+MIN_LEAF_ENTRIES: int = ORDER - 1   # = 63
+MIN_INTERNAL_KEYS: int = ORDER - 1  # = 63 (internal has children - 1 keys)
+MIN_INTERNAL_CHILDREN: int = ORDER  # = 64
 
 
 # --- BTreeIndex ---------------------------------------------------------
@@ -70,19 +95,27 @@ class BTreeIndex:
     """B-tree index over a :class:`Pager`-backed 4 KB page set.
 
     The tree grows beyond a single leaf by splitting nodes on insert
-    overflow.  ``__init__`` performs no I/O — the root page is loaded
-    lazily on the first read or write; :meth:`flush` re-writes the
-    current state for callers that want explicit persistence.
+    overflow, and shrinks back via borrow / merge / root collapse on
+    :meth:`delete`.  ``__init__`` performs no I/O — the root page is
+    loaded lazily on the first read or write; :meth:`flush` re-writes
+    the current state for callers that want explicit persistence.
 
-    Deferred to later tasks:
+    The :data:`ORDER`, :data:`MIN_LEAF_ENTRIES`, :data:`MIN_INTERNAL_KEYS`
+    and :data:`MIN_INTERNAL_CHILDREN` constants are exposed both as
+    module globals and as class attributes so tests can ``from
+    tinydb.index.btree import BTreeIndex, MIN_LEAF_ENTRIES`` and
+    reference either side.
 
-    * :meth:`delete` — raises :class:`NotImplementedError`.
-    * :meth:`search` — raises :class:`NotImplementedError`; T-4.3
-      will replace the linear leaf scan with a real tree walk.
-    * :meth:`range` — descends to the leftmost leaf whose key might
-      satisfy ``lo``, then walks the sibling chain.  T-4.3 will replace
-      this with a true tree-walking range scan.
+    Deferred to later tasks: composite keys (T-4.5), catalog
+    integration (T-4.6).
     """
+
+    # Expose order constants as class attributes too — convenient for
+    # callers using ``BTreeIndex.ORDER`` instead of importing the module.
+    ORDER: int = ORDER
+    MIN_LEAF_ENTRIES: int = MIN_LEAF_ENTRIES
+    MIN_INTERNAL_KEYS: int = MIN_INTERNAL_KEYS
+    MIN_INTERNAL_CHILDREN: int = MIN_INTERNAL_CHILDREN
 
     def __init__(self, pager: Pager, root_pid: int, key_type: TypeTag) -> None:
         self._pager = pager
@@ -144,62 +177,6 @@ class BTreeIndex:
         """
         idx = _upper_bound(internal.keys, key)
         return min(idx, len(internal.children) - 1)
-
-    # -- split helpers ---------------------------------------------------
-
-    @staticmethod
-    def _split_leaf(
-        pager: Pager, pid: int, leaf: LeafNode, key_type: TypeTag
-    ) -> tuple[Any, int]:
-        """Split ``leaf`` at ``pid`` into two pages.
-
-        The left half stays at ``pid``; the right half lives on a fresh
-        page.  The left's ``next_leaf_pid`` is rewritten to point at
-        the new right page so the sibling chain stays walkable; the
-        right inherits whatever sibling ``leaf`` had.  Returns
-        ``(sep_key, right_pid)`` where ``sep_key`` is the smallest key
-        in the right page — the value the parent must promote.
-        """
-        mid = len(leaf.keys) // 2
-        old_next = leaf.next_leaf_pid
-        right_pid = pager.allocate_page()
-        left = LeafNode(
-            keys=leaf.keys[:mid],
-            rids=leaf.rids[:mid],
-            next_leaf_pid=right_pid,
-        )
-        right = LeafNode(
-            keys=leaf.keys[mid:],
-            rids=leaf.rids[mid:],
-            next_leaf_pid=old_next,
-        )
-        _write_leaf(pager, pid, left, key_type)
-        _write_leaf(pager, right_pid, right, key_type)
-        return right.keys[0], right_pid
-
-    @staticmethod
-    def _split_internal(
-        pager: Pager, pid: int, node: InternalNode, key_type: TypeTag
-    ) -> tuple[Any, int]:
-        """Split ``node`` at ``pid`` into two internal pages.
-
-        The middle key is pushed up to the parent and does NOT appear
-        in either child.  Returns ``(push_up_key, right_pid)``.
-        """
-        mid = len(node.keys) // 2
-        push_up_key = node.keys[mid]
-        left = InternalNode(
-            keys=node.keys[:mid],
-            children=node.children[: mid + 1],
-        )
-        right = InternalNode(
-            keys=node.keys[mid + 1 :],
-            children=node.children[mid + 1 :],
-        )
-        right_pid = pager.allocate_page()
-        _write_internal(pager, pid, left, key_type)
-        _write_internal(pager, right_pid, right, key_type)
-        return push_up_key, right_pid
 
     # -- public API ------------------------------------------------------
 
@@ -321,7 +298,7 @@ class BTreeIndex:
                 _write_leaf(self._pager, pid, node, self._key_type)
                 return None
             except BTreeOverflowError:
-                push_up_key, right_pid = self._split_leaf(
+                push_up_key, right_pid = split_leaf(
                     self._pager, pid, node, self._key_type
                 )
                 return push_up_key, right_pid
@@ -345,7 +322,7 @@ class BTreeIndex:
             _write_internal(self._pager, pid, node, self._key_type)
             return None
         except BTreeOverflowError:
-            up_key, new_right = self._split_internal(
+            up_key, new_right = split_internal(
                 self._pager, pid, node, self._key_type
             )
             return up_key, new_right
@@ -369,11 +346,48 @@ class BTreeIndex:
         )
 
     def delete(self, key: Any, rid: Rid) -> None:
-        """Remove ``(key, rid)`` from the leaf.
+        """Remove ``(key, rid)`` from the tree, rebalancing on underflow.
 
-        Placeholder — delete + rebalance arrive in T-4.4.
+        Behaviour:
+
+        * Silent no-op when ``(key, rid)`` is not present — matches
+          ``dict.pop(key, None)`` semantics.  No exception is raised.
+        * On underflow, prefer borrowing from the left sibling (keeps
+          the parent separator stable); fall back to merging with the
+          right sibling (right wins — the child page becomes orphan).
+        * Root collapse: if the root is an internal node left with a
+          single child after a merge, that child takes over as root.
+
+        Duplicates: only the specific ``rid`` under ``key`` is
+        removed; other rids for the same key remain in insertion
+        order.
         """
-        raise NotImplementedError("delete + rebalance arrives in T-4.4")
+        self._ensure_loaded()
+        if self._root_view is None:
+            return
+        btree_delete.delete_from_subtree(
+            self._pager,
+            self._root_pid,
+            self._root_view,
+            key,
+            rid,
+            self._key_type,
+            order=ORDER,
+            min_leaf_entries=MIN_LEAF_ENTRIES,
+            min_internal_children=MIN_INTERNAL_CHILDREN,
+            read_node_view=self._read_node_view,
+            find_child=self._find_child,
+        )
+        # Try to collapse the root if it ended up as a singleton
+        # internal node.  Uses a single-element list as an out-param
+        # so the helper can mutate the BTreeIndex's view atomically.
+        root_ref: list[LeafNode | InternalNode | None] = [self._root_view]
+        new_pid, _ = btree_delete.collapse_root_if_singleton(
+            self._pager, root_ref, self._read_node_view
+        )
+        if new_pid is not None:
+            self._root_pid = new_pid
+            self._root_view = root_ref[0]
 
     def flush(self) -> None:
         """Re-write the current root to disk.  Idempotent; cheap.

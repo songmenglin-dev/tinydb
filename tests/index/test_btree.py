@@ -236,17 +236,6 @@ def test_date_keys_roundtrip_through_codec(tmp_db_path):
 # --- deferred methods ---------------------------------------------------
 
 
-def test_delete_raises_not_implemented(tmp_db_path):
-    """``delete()`` is deferred to T-4.4 (NotImplementedError placeholder)."""
-    p = Pager.open(tmp_db_path)
-    try:
-        idx, _pid = _make_index(p, TypeTag.Int)
-        with pytest.raises(NotImplementedError):
-            idx.delete(42, Rid(0, 0))
-    finally:
-        p.close()
-
-
 def test_search_raises_not_implemented(tmp_db_path):
     """Placeholder from T-4.1 era — T-4.3 implements search via tree walk.
 
@@ -746,3 +735,316 @@ def test_read_internal_no_key_type_arg(tmp_db_path):
         assert len(internal.children) >= 2
     finally:
         p.close()
+
+
+# --- T-4.4: delete + rebalance ------------------------------------------
+
+
+# --- constants ----------------------------------------------------------
+
+
+def test_btree_order_constants_exposed():
+    """T-4.4: the B-tree order + min-occupancy constants must be exposed
+    as class attributes on :class:`BTreeIndex` so tests can import and
+    assert against them.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    assert BTreeIndex.ORDER == 64
+    assert BTreeIndex.MIN_LEAF_ENTRIES == 63
+    assert BTreeIndex.MIN_INTERNAL_CHILDREN == 64
+
+
+# --- basic delete --------------------------------------------------------
+
+
+def test_delete_basic_removes_one_entry(tmp_db_path):
+    """Insert 5, delete 1, the rest remain and are range-able."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rid_map = {i: Rid(page_id=0, slot_id=i) for i in range(5)}
+        for i in range(5):
+            idx.insert(i, rid_map[i])
+        idx.delete(2, rid_map[2])
+        # search confirms removal of key 2.
+        assert idx.search(2) == []
+        # the other four are still searchable.
+        for i in [0, 1, 3, 4]:
+            assert idx.search(i) == [rid_map[i]]
+        # range across everything returns the surviving 4 in order.
+        assert list(idx.range(0, 100)) == [rid_map[i] for i in [0, 1, 3, 4]]
+    finally:
+        p.close()
+
+
+def test_delete_last_entry_leaves_empty_leaf(tmp_db_path):
+    """Insert a single entry, delete it; the leaf is empty and range
+    yields nothing."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        idx.insert(42, Rid(0, 0))
+        idx.delete(42, Rid(0, 0))
+        assert idx.search(42) == []
+        assert list(idx.range(0, 100)) == []
+    finally:
+        p.close()
+
+
+def test_delete_nonexistent_is_silent_noop(tmp_db_path):
+    """``delete(key, rid)`` for an absent (key, rid) is a silent no-op.
+
+    Matches ``dict.pop(key, None)`` semantics for the case where the
+    key exists in the index but the specific rid does not.  No
+    exception, no change to other entries.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rid_a = Rid(page_id=0, slot_id=0)
+        rid_b = Rid(page_id=0, slot_id=99)  # never inserted
+        idx.insert(42, rid_a)
+        # Should not raise.
+        idx.delete(42, rid_b)
+        idx.delete(99, rid_a)  # key absent — also no-op
+        # rid_a must still be there under key 42.
+        assert idx.search(42) == [rid_a]
+    finally:
+        p.close()
+
+
+# --- sequential delete + persistence ------------------------------------
+
+
+def test_delete_all_to_empty(tmp_db_path):
+    """Insert 50, delete them all; the index reports an empty range."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rids = [Rid(page_id=0, slot_id=i) for i in range(50)]
+        for i in range(50):
+            idx.insert(i, rids[i])
+        for i in range(50):
+            idx.delete(i, rids[i])
+        assert list(idx.range(0, 1000)) == []
+        for i in range(50):
+            assert idx.search(i) == []
+    finally:
+        p.close()
+
+
+def test_delete_all_through_root_collapse(tmp_db_path):
+    """Insert enough Int keys to force an internal-root split; deleting
+    all entries must collapse the root back to a single leaf.
+
+    500 Int keys forces both leaf and internal-node splits.  As we
+    delete every entry, the root must eventually become a leaf again
+    (root collapse).  The final leaf carries no entries.
+    """
+    from tinydb.index.btree import BTreeIndex, InternalNode, LeafNode
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rids = [Rid(page_id=0, slot_id=i) for i in range(500)]
+        for i in range(500):
+            idx.insert(i, rids[i])
+        # Sanity: the root is internal after the splits.
+        assert isinstance(idx._root_view, InternalNode)
+        # Delete all entries (in arbitrary order).
+        for i in range(500):
+            idx.delete(i, rids[i])
+        # After collapsing, root should be a leaf (or have been replaced
+        # by the surviving leaf subtree).
+        assert isinstance(idx._root_view, LeafNode)
+        assert idx._root_view.keys == []
+        assert list(idx.range(0, 1000)) == []
+    finally:
+        p.close()
+
+
+def test_delete_leftmost_key_preserves_rest(tmp_db_path):
+    """Delete the smallest key in the index; the rest remain in order."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rid_1 = Rid(page_id=0, slot_id=1)
+        rids = [Rid(page_id=0, slot_id=i) for i in range(2, 101)]
+        idx.insert(1, rid_1)
+        for i in range(2, 101):
+            idx.insert(i, rids[i - 2])
+        idx.delete(1, rid_1)
+        assert idx.search(1) == []
+        assert list(idx.range(2, 100)) == rids
+    finally:
+        p.close()
+
+
+def test_delete_rightmost_key_preserves_rest(tmp_db_path):
+    """Delete the largest key in the index; the rest remain in order."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rids = [Rid(page_id=0, slot_id=i) for i in range(1, 100)]
+        idx.insert(100, Rid(page_id=0, slot_id=100))
+        for i in range(1, 100):
+            idx.insert(i, rids[i - 1])
+        idx.delete(100, Rid(page_id=0, slot_id=100))
+        assert idx.search(100) == []
+        assert list(idx.range(1, 99)) == rids
+    finally:
+        p.close()
+
+
+# --- borrow / merge ----------------------------------------------------
+
+
+def test_delete_triggers_borrow_between_leaves(tmp_db_path):
+    """Insert enough keys to produce multiple leaves, then delete from
+    one side enough to trigger a borrow from the sibling.  All
+    surviving entries must remain reachable and in key order.
+    """
+    from tinydb.index.btree import BTreeIndex, MIN_LEAF_ENTRIES, LeafNode
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        # 500 Int keys forces leaf splits (a single leaf fits ~340 Int
+        # entries, so 500 needs at least two leaves).
+        rids = [Rid(page_id=0, slot_id=i) for i in range(500)]
+        for i in range(500):
+            idx.insert(i, rids[i])
+        # Delete entries that all land in the same leaf (the first
+        # one), pushing it below MIN_LEAF_ENTRIES.  We don't know
+        # precisely where the split point lies, so delete the lowest
+        # keys first — most of them are in the leftmost leaf.
+        deleted = {i for i in range(0, 500, 5)}
+        for i in sorted(deleted):
+            idx.delete(i, rids[i])
+        # Surviving entries are those not in `deleted`.  Note: any
+        # borrow/merge must keep all of them.
+        surviving_keys = [i for i in range(500) if i not in deleted]
+        surviving_rids = [rids[i] for i in surviving_keys]
+        # Range must return the surviving entries in key order.
+        assert list(idx.range(0, 1000)) == surviving_rids
+    finally:
+        p.close()
+
+
+def test_delete_triggers_merge_when_sibling_cannot_borrow(tmp_db_path):
+    """When both leaves are at the minimum, deleting forces a merge —
+    a leaf is absorbed into its sibling.  Range still returns all
+    surviving entries in order.
+    """
+    from tinydb.index.btree import BTreeIndex, MIN_LEAF_ENTRIES
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rids = [Rid(page_id=0, slot_id=i) for i in range(500)]
+        for i in range(500):
+            idx.insert(i, rids[i])
+        # Delete enough from one side to force a merge.  Take the
+        # first ~80% (way more than half) so every leaf must shrink
+        # below MIN; the remaining leaves must merge to satisfy the
+        # occupancy invariant.
+        deleted = {i for i in range(0, 500, 1) if i % 5 != 0}  # ~400 deletes
+        for i in sorted(deleted):
+            idx.delete(i, rids[i])
+        # Surviving entries: those not deleted (1 % 5 == 0 -> i in [0, 5, 10, ...])
+        surviving = [i for i in range(500) if i not in deleted]
+        # Range must return surviving entries in key order.
+        result = list(idx.range(0, 1000))
+        assert result == [rids[i] for i in surviving]
+    finally:
+        p.close()
+
+
+# --- duplicate keys ----------------------------------------------------
+
+
+def test_delete_duplicate_key_specific_rid(tmp_db_path):
+    """Inserting the same key with multiple rids and deleting one rid
+    must leave the others intact.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rid_a = Rid(page_id=7, slot_id=0)
+        rid_b = Rid(page_id=7, slot_id=1)
+        rid_c = Rid(page_id=7, slot_id=2)
+        idx.insert(42, rid_a)
+        idx.insert(42, rid_b)
+        idx.insert(42, rid_c)
+        idx.delete(42, rid_b)
+        assert idx.search(42) == [rid_a, rid_c]
+    finally:
+        p.close()
+
+
+def test_delete_mismatched_rid_is_noop(tmp_db_path):
+    """``delete(key, rid)`` with a rid that was never inserted under
+    ``key`` is a silent no-op; the inserted rid remains.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        rid_a = Rid(page_id=7, slot_id=0)
+        rid_b = Rid(page_id=7, slot_id=1)
+        idx.insert(42, rid_a)
+        idx.delete(42, rid_b)  # rid_b was never inserted under 42
+        assert idx.search(42) == [rid_a]
+    finally:
+        p.close()
+
+
+# --- persistence -------------------------------------------------------
+
+
+def test_delete_persists_across_reopen(tmp_db_path):
+    """Insert 100, delete 50, flush+reopen; the surviving 50 are
+    still in the index.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Int)
+        rids = [Rid(page_id=0, slot_id=i) for i in range(100)]
+        for i in range(100):
+            idx.insert(i, rids[i])
+        # Delete the first 50 entries.
+        for i in range(50):
+            idx.delete(i, rids[i])
+    finally:
+        p.close()
+
+    p2 = Pager.open(tmp_db_path)
+    try:
+        idx2 = BTreeIndex(p2, root_pid=pid, key_type=TypeTag.Int)
+        surviving = [rids[i] for i in range(50, 100)]
+        assert list(idx2.range(0, 1000)) == surviving
+        for i in range(50):
+            assert idx2.search(i) == []
+        for i in range(50, 100):
+            assert idx2.search(i) == [rids[i]]
+    finally:
+        p2.close()
