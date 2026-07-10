@@ -32,14 +32,20 @@ from typing import List, Optional
 
 from tinydb.errors import ParseError
 from tinydb.sql.ast import (
+    Assignment,
     BinaryOp,
     ColumnRef,
     CreateTable,
+    Delete,
     DropTable,
     Expr,
+    Insert,
     Literal,
+    Select,
+    Star,
     Statement,
     UnaryOp,
+    Update,
 )
 from tinydb.sql.tokens import Token, TokenKind
 from tinydb.types.system import Column, parse_type_name
@@ -240,6 +246,122 @@ class _Parser:
         self._match_kind(TokenKind.SEMI)
         return DropTable(name=name_tok.value, if_exists=if_exists)
 
+    # --- DML dispatch (T-3.4b) -------------------------------------
+
+    def parse_dml(self) -> Statement:
+        """Dispatch on the leading keyword (INSERT/SELECT/UPDATE/DELETE)."""
+        tok = self._peek()
+        if tok.kind is TokenKind.KEYWORD:
+            if tok.value == "INSERT":
+                return self._parse_insert()
+            if tok.value == "SELECT":
+                return self._parse_select()
+            if tok.value == "UPDATE":
+                return self._parse_update()
+            if tok.value == "DELETE":
+                return self._parse_delete()
+        raise ParseError(
+            tok.line, tok.col,
+            f"expected DML keyword (INSERT/SELECT/UPDATE/DELETE), "
+            f"got {tok.kind.name} {tok.value!r}",
+        )
+
+    # --- INSERT -----------------------------------------------------
+
+    def _parse_insert(self) -> Insert:
+        self._expect_keyword("INSERT")
+        self._expect_keyword("INTO")
+        name_tok = self._expect_ident()
+        # Optional column list — ``(col1, col2, ...)``.
+        columns: Optional[tuple] = None
+        if self._match_kind(TokenKind.LPAREN):
+            cols = [self._expect_ident().value]
+            while self._match_kind(TokenKind.COMMA):
+                cols.append(self._expect_ident().value)
+            self._expect_kind(TokenKind.RPAREN)
+            columns = tuple(cols)
+        self._expect_keyword("VALUES")
+        # One or more comma-separated value tuples.
+        values = [self._parse_value_tuple()]
+        while self._match_kind(TokenKind.COMMA):
+            values.append(self._parse_value_tuple())
+        # Optional trailing semicolon.
+        self._match_kind(TokenKind.SEMI)
+        return Insert(table=name_tok.value, columns=columns, values=tuple(values))
+
+    def _parse_value_tuple(self) -> tuple:
+        """``(v1, v2, ...)`` — comma-separated literals for one row."""
+        self._expect_kind(TokenKind.LPAREN)
+        vals = [self._parse_value()]
+        while self._match_kind(TokenKind.COMMA):
+            vals.append(self._parse_value())
+        self._expect_kind(TokenKind.RPAREN)
+        return tuple(vals)
+
+    def _parse_value(self):
+        """A literal value in an INSERT VALUES list (no expressions)."""
+        return self._parse_literal().value
+
+    # --- SELECT -----------------------------------------------------
+
+    def _parse_select(self) -> Select:
+        self._expect_keyword("SELECT")
+        columns = self._parse_select_columns()
+        self._expect_keyword("FROM")
+        table_tok = self._expect_ident()
+        where: Optional[Expr] = None
+        if self._match_keyword("WHERE"):
+            where = self.parse_expr()
+        # Optional trailing semicolon.
+        self._match_kind(TokenKind.SEMI)
+        return Select(columns=columns, table=table_tok.value, where=where)
+
+    def _parse_select_columns(self) -> tuple:
+        """Either ``*`` (Star sentinel) or one-or-more comma-separated exprs."""
+        tok = self._peek()
+        if tok.kind is TokenKind.OP and tok.value == "*":
+            self._advance()
+            return (Star(),)
+        cols = [self.parse_expr()]
+        while self._match_kind(TokenKind.COMMA):
+            cols.append(self.parse_expr())
+        return tuple(cols)
+
+    # --- UPDATE -----------------------------------------------------
+
+    def _parse_update(self) -> Update:
+        self._expect_keyword("UPDATE")
+        table_tok = self._expect_ident()
+        self._expect_keyword("SET")
+        set_clauses = [self._parse_assignment()]
+        while self._match_kind(TokenKind.COMMA):
+            set_clauses.append(self._parse_assignment())
+        where: Optional[Expr] = None
+        if self._match_keyword("WHERE"):
+            where = self.parse_expr()
+        self._match_kind(TokenKind.SEMI)
+        return Update(
+            table=table_tok.value, set_clauses=tuple(set_clauses), where=where,
+        )
+
+    def _parse_assignment(self) -> Assignment:
+        col_tok = self._expect_ident()
+        self._expect_kind(TokenKind.OP)  # '='
+        value = self.parse_expr()
+        return Assignment(column=col_tok.value, value=value)
+
+    # --- DELETE -----------------------------------------------------
+
+    def _parse_delete(self) -> Delete:
+        self._expect_keyword("DELETE")
+        self._expect_keyword("FROM")
+        table_tok = self._expect_ident()
+        where: Optional[Expr] = None
+        if self._match_keyword("WHERE"):
+            where = self.parse_expr()
+        self._match_kind(TokenKind.SEMI)
+        return Delete(table=table_tok.value, where=where)
+
     # --- expression parser (T-3.4a) --------------------------------
     #
     # Precedence ladder, lowest → highest:
@@ -327,21 +449,11 @@ class _Parser:
     def _parse_primary(self) -> Expr:
         tok = self._peek()
         # Literals — value already typed by the lexer.
-        if tok.kind is TokenKind.INT_LIT:
-            self._advance()
-            return Literal(value=tok.value)
-        if tok.kind is TokenKind.FLOAT_LIT:
-            self._advance()
-            return Literal(value=tok.value)
-        if tok.kind is TokenKind.STRING_LIT:
-            self._advance()
-            return Literal(value=tok.value)
-        if tok.kind is TokenKind.BOOL_LIT:
-            self._advance()
-            return Literal(value=tok.value)
-        if tok.kind is TokenKind.NULL_LIT:
-            self._advance()
-            return Literal(value=None)
+        if tok.kind in (
+            TokenKind.INT_LIT, TokenKind.FLOAT_LIT, TokenKind.STRING_LIT,
+            TokenKind.BOOL_LIT, TokenKind.NULL_LIT,
+        ):
+            return self._parse_literal()
         # Parenthesised sub-expression.
         if tok.kind is TokenKind.LPAREN:
             self._advance()
@@ -365,6 +477,21 @@ class _Parser:
         raise ParseError(
             tok.line, tok.col,
             f"expected expression, got {tok.kind.name} {tok.value!r}",
+        )
+
+    def _parse_literal(self) -> Literal:
+        """Consume one literal token and wrap it in a Literal AST node."""
+        tok = self._peek()
+        if tok.kind in (
+            TokenKind.INT_LIT, TokenKind.FLOAT_LIT, TokenKind.STRING_LIT,
+            TokenKind.BOOL_LIT, TokenKind.NULL_LIT,
+        ):
+            self._advance()
+            value = None if tok.kind is TokenKind.NULL_LIT else tok.value
+            return Literal(value=value)
+        raise ParseError(
+            tok.line, tok.col,
+            f"expected literal, got {tok.kind.name} {tok.value!r}",
         )
 
     # --- helpers ----------------------------------------------------
@@ -411,4 +538,14 @@ def parse_expr(tokens: List[Token]) -> Expr:
     return expr
 
 
-__all__ = ["parse_ddl", "parse_expr"]
+def parse_dml(tokens: List[Token]) -> Statement:
+    """Parse a token stream as a DML statement (INSERT/SELECT/UPDATE/DELETE).
+
+    Returns an :class:`Insert`, :class:`Select`, :class:`Update`, or
+    :class:`Delete` AST node.  Raises :class:`ParseError` with the
+    offending token's line / column on any syntactic error.
+    """
+    return _Parser(tokens).parse_dml()
+
+
+__all__ = ["parse_ddl", "parse_dml", "parse_expr"]
