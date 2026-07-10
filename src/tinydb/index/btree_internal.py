@@ -31,7 +31,14 @@ from tinydb.storage.pager import PAGE_SIZE, Pager
 from tinydb.types.codec import decode_value, encode_value
 from tinydb.types.system import TypeTag
 
-__all__ = ["InternalNode", "_read_internal", "_write_internal"]
+__all__ = [
+    "InternalNode",
+    "_lower_bound",
+    "_read_internal",
+    "_read_internal_from_bytes",
+    "_upper_bound",
+    "_write_internal",
+]
 
 # Header layout (kept in sync with btree_leaf.py).
 _INTERNAL_NODE_TYPE: int = 0x02
@@ -58,6 +65,33 @@ class InternalNode:
 
     keys: list[Any] = field(default_factory=list)
     children: list[int] = field(default_factory=list)
+
+
+# --- ordered-key helpers -----------------------------------------------
+
+
+def _lower_bound(keys: list[Any], key: Any) -> int:
+    """Leftmost index where ``keys[i] >= key`` (a.k.a. ``bisect_left``)."""
+    lo, hi = 0, len(keys)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if keys[mid] < key:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def _upper_bound(keys: list[Any], key: Any) -> int:
+    """Leftmost index where ``keys[i] > key`` (a.k.a. ``bisect_right``)."""
+    lo, hi = 0, len(keys)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if keys[mid] <= key:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
 
 
 def _write_internal(
@@ -102,18 +136,25 @@ def _write_internal(
     pager.write_page(pid, bytes(page))
 
 
-def _read_internal(
-    pager: Pager, pid: int, key_type: TypeTag | None = None
-) -> InternalNode:
+def _read_internal(pager: Pager, pid: int) -> InternalNode:
     """Decode page ``pid`` into an :class:`InternalNode`.
 
-    The ``key_type`` argument is kept for symmetry with the leaf reader
-    but unused — the on-wire tag byte at the front of each encoded key
-    is authoritative.  ``key_type`` is optional so callers reading for
-    inspection (e.g. tests) can pass just ``(pager, pid)``.
+    Thin wrapper that reads the page and delegates to
+    :func:`_read_internal_from_bytes`.  Callers that already hold the
+    page bytes (e.g. ``_read_node_view`` after type-byte inspection)
+    should call the from-bytes variant to avoid a second read.
+
+    The on-wire tag byte at the front of each encoded key is
+    authoritative; no separate ``key_type`` argument is needed.
     """
-    del key_type  # on-wire tag is authoritative
-    page = pager.read_page(pid)
+    return _read_internal_from_bytes(pager.read_page(pid), pid)
+
+
+def _read_internal_from_bytes(page: bytes, pid: int) -> InternalNode:
+    """Decode an already-read internal ``page`` into an :class:`InternalNode`.
+
+    See :func:`_read_internal` for the public 2-arg wrapper.
+    """
     node_type = page[0]
     if node_type != _INTERNAL_NODE_TYPE:
         raise ValueError(

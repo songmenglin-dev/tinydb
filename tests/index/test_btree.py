@@ -248,12 +248,16 @@ def test_delete_raises_not_implemented(tmp_db_path):
 
 
 def test_search_raises_not_implemented(tmp_db_path):
-    """``search()`` via tree walk is deferred to T-4.3."""
+    """Placeholder from T-4.1 era — T-4.3 implements search via tree walk.
+
+    Kept as a smoke test for an empty index: ``search`` must return
+    ``[]`` rather than raising.  The T-4.1 ``NotImplementedError`` test
+    is now obsolete.
+    """
     p = Pager.open(tmp_db_path)
     try:
         idx, _pid = _make_index(p, TypeTag.Int)
-        with pytest.raises(NotImplementedError):
-            idx.search(42)
+        assert idx.search(42) == []
     finally:
         p.close()
 
@@ -284,7 +288,8 @@ def test_tail_leaf_persists_no_next_sentinel(tmp_db_path):
     (``0xFFFFFFFF``) as the tail marker or chain-walking code will read
     page 0 as a valid sibling.
     """
-    from tinydb.index.btree import BTreeIndex, NO_NEXT, _read_leaf
+    from tinydb.index.btree import BTreeIndex, NO_NEXT
+    from tinydb.index.btree_leaf import _read_leaf
 
     p = Pager.open(tmp_db_path)
     try:
@@ -297,7 +302,7 @@ def test_tail_leaf_persists_no_next_sentinel(tmp_db_path):
 
     p2 = Pager.open(tmp_db_path)
     try:
-        leaf = _read_leaf(p2, pid, TypeTag.Int)
+        leaf = _read_leaf(p2, pid)
         assert leaf.next_leaf_pid == NO_NEXT
     finally:
         p2.close()
@@ -393,7 +398,8 @@ def test_root_becomes_internal_after_split(tmp_db_path):
     to point at a real internal node.  ``_read_internal`` on the new
     root_pid must yield a node with at least two children.
     """
-    from tinydb.index.btree import BTreeIndex, _read_internal
+    from tinydb.index.btree import BTreeIndex
+    from tinydb.index.btree_internal import _read_internal
 
     p = Pager.open(tmp_db_path)
     try:
@@ -458,3 +464,285 @@ def test_module_reexports_internal_node_and_overflow_error():
     assert InternalNode is InternalNodeB
     assert BTreeOverflowError is BTreeOverflowErrorB
     assert BTreeIndexA.__module__ == "tinydb.index.btree"
+
+
+# --- T-4.3: search via tree walk + range tree-descent -------------------
+
+
+def test_search_basic_returns_single_rid(tmp_db_path):
+    """``search(key)`` returns the rid inserted under ``key``.
+
+    100 Int keys, no split, single-leaf tree.  ``search(42)`` returns
+    the single rid that was inserted under key 42.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(100):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        assert idx.search(42) == [Rid(page_id=0, slot_id=42)]
+    finally:
+        p.close()
+
+
+def test_search_duplicate_keys_returns_all_rids(tmp_db_path):
+    """``search(key)`` returns every rid under a duplicated key.
+
+    Inserts 3 entries under key 42 plus 4 entries under other keys.
+    ``search(42)`` must return all 3 rids (in insertion order).
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        idx.insert(42, Rid(page_id=7, slot_id=0))
+        idx.insert(42, Rid(page_id=7, slot_id=1))
+        idx.insert(42, Rid(page_id=7, slot_id=2))
+        idx.insert(10, Rid(page_id=7, slot_id=3))
+        idx.insert(99, Rid(page_id=7, slot_id=4))
+        assert idx.search(42) == [
+            Rid(page_id=7, slot_id=0),
+            Rid(page_id=7, slot_id=1),
+            Rid(page_id=7, slot_id=2),
+        ]
+    finally:
+        p.close()
+
+
+def test_search_key_absent_returns_empty(tmp_db_path):
+    """``search(key)`` for a missing key returns an empty list."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(50):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        assert idx.search(9999) == []
+    finally:
+        p.close()
+
+
+def test_search_after_split_finds_keys_across_leaves(tmp_db_path):
+    """After a leaf split, ``search`` walks the tree to find a key in
+    any leaf.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(300):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        # Pick a key in a leaf past the split boundary.
+        assert idx.search(250) == [Rid(page_id=0, slot_id=250)]
+        assert idx.search(0) == [Rid(page_id=0, slot_id=0)]
+        assert idx.search(299) == [Rid(page_id=0, slot_id=299)]
+    finally:
+        p.close()
+
+
+def test_search_empty_index_returns_empty(tmp_db_path):
+    """``search`` on an empty (never-inserted) index returns ``[]``."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        assert idx.search(42) == []
+    finally:
+        p.close()
+
+
+def test_range_tree_descent_finds_correct_starting_leaf(tmp_db_path):
+    """``range(lo, hi)`` descends to the leftmost leaf whose key may
+    satisfy ``lo`` and walks the sibling chain.
+
+    Inserts 300 Int keys, then ``range(50, 60)`` must return rids for
+    exactly keys 50..60 (11 entries) in key order.  This proves the
+    tree descent landed on the right starting leaf — picking the
+    wrong leaf would either miss key 50 or include key 61+.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(300):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        result = list(idx.range(50, 60))
+        assert result == [Rid(page_id=0, slot_id=i) for i in range(50, 61)]
+    finally:
+        p.close()
+
+
+def test_range_inclusive_false_excludes_hi_in_split_tree(tmp_db_path):
+    """With ``inclusive=False``, the ``hi`` endpoint is excluded even
+    after a split has produced multiple leaves.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(300):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        result = list(idx.range(50, 60, inclusive=False))
+        # 50..59 inclusive (60 excluded).
+        assert result == [Rid(page_id=0, slot_id=i) for i in range(50, 60)]
+    finally:
+        p.close()
+
+
+def test_range_with_lo_greater_than_hi_returns_empty(tmp_db_path):
+    """``range(lo, hi)`` with ``lo > hi`` returns an empty iterator."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(50):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        assert list(idx.range(40, 10)) == []
+    finally:
+        p.close()
+
+
+def test_range_with_lo_equal_to_hi_returns_single_key(tmp_db_path):
+    """``range(lo, lo)`` returns rids for the single key ``lo``."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(300):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        result = list(idx.range(123, 123))
+        assert result == [Rid(page_id=0, slot_id=123)]
+    finally:
+        p.close()
+
+
+# --- NIT #5: _split_internal happy path ---------------------------------
+
+
+def test_split_internal_happy_path_produces_valid_children(tmp_db_path):
+    """NIT #5: an internal-node split must produce a child internal
+    node with a well-formed (keys, children) shape.
+
+    200-char Text keys keep leaves small (~19 entries per page), so
+    500 inserts force both leaf splits and an internal-node split.
+    After the work, the tree has an internal root whose children
+    include at least one internal node (the right side of an internal
+    split).  Range over the full keyspace must return every entry.
+    """
+    from tinydb.index.btree import BTreeIndex, InternalNode
+    from tinydb.index.btree_internal import _read_internal
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Text)
+        for i in range(500):
+            idx.insert(f"k-{i:200d}", Rid(page_id=0, slot_id=i))
+        # The root must be an internal node after all those splits.
+        assert isinstance(idx._root_view, InternalNode)
+        root = idx._root_view
+        # The internal split path returns (push_up_key, right_pid) where
+        # the right child is itself a fresh internal node.  Verify
+        # consistency: len(children) == len(keys) + 1.
+        assert len(root.keys) + 1 == len(root.children)
+        # Verify the tree is well-formed by reading each child and
+        # checking that any internal child is also well-formed.
+        for child_pid in root.children:
+            child = _read_internal(p, child_pid)
+            assert len(child.keys) + 1 == len(child.children)
+        # And every entry is still reachable via range.
+        result = list(idx.range("a", "z"))
+        assert len(result) == 500
+    finally:
+        p.close()
+
+
+def test_split_internal_data_integrity_through_reopen(tmp_db_path):
+    """An internal-node split survives close+reopen with no data loss.
+
+    Same setup as ``test_split_internal_happy_path_*``; after the
+    tree has multiple internal levels, closing the Pager and
+    reopening must still expose every entry.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Text)
+        for i in range(500):
+            idx.insert(f"k-{i:200d}", Rid(page_id=0, slot_id=i))
+        # Capture the (possibly new) root pid AFTER all splits.
+        root_pid = idx._root_pid
+    finally:
+        p.close()
+
+    p2 = Pager.open(tmp_db_path)
+    try:
+        idx2 = BTreeIndex(p2, root_pid=root_pid, key_type=TypeTag.Text)
+        result = list(idx2.range("a", "z"))
+        assert len(result) == 500
+        # And the root is still an internal node after reopen.
+        from tinydb.index.btree import InternalNode
+
+        assert isinstance(idx2._root_view, InternalNode)
+    finally:
+        p2.close()
+
+
+# --- NIT #1: key_type removed from reader signatures -------------------
+
+
+def test_read_leaf_no_key_type_arg(tmp_db_path):
+    """NIT #1: ``_read_leaf`` no longer accepts a ``key_type`` arg.
+
+    The on-wire tag byte is authoritative, so the parameter was
+    misleading dead weight.  Calling with the new 2-arg signature
+    must still return a valid ``LeafNode``.
+    """
+    from tinydb.index.btree_leaf import _read_leaf
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        # Construct an index, insert one key, then re-read.
+        from tinydb.index.btree import BTreeIndex
+
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Int)
+        idx.insert(7, Rid(page_id=0, slot_id=0))
+        # 2-arg call: no key_type.
+        leaf = _read_leaf(p, pid)
+        assert leaf.keys == [7]
+        assert leaf.rids == [Rid(page_id=0, slot_id=0)]
+    finally:
+        p.close()
+
+
+def test_read_internal_no_key_type_arg(tmp_db_path):
+    """NIT #1: ``_read_internal`` no longer accepts a ``key_type`` arg."""
+    from tinydb.index.btree_internal import _read_internal
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        from tinydb.index.btree import BTreeIndex, InternalNode
+
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Int)
+        for i in range(300):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        # Root has been promoted to an internal node by the split.
+        assert isinstance(idx._root_view, InternalNode)
+        # 2-arg call: no key_type.
+        internal = _read_internal(p, idx._root_pid)
+        assert len(internal.children) >= 2
+    finally:
+        p.close()

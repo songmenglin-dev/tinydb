@@ -4,11 +4,10 @@ The leaf / internal page layouts and (de)serialisers live in
 :mod:`tinydb.index.btree_leaf` and :mod:`tinydb.index.btree_internal`
 respectively; this module owns the cross-cutting pieces:
 
-* :class:`BTreeOverflowError` — capacity signal raised by ``_write_leaf``
-  / ``_write_internal`` and caught by the insert path's split logic.
 * :class:`BTreeIndex` — the public index class.  Holds the root page
   id and a lazy view of the root node (leaf or internal), runs
-  inserts, splits on overflow, walks the tree for :meth:`range`.
+  inserts, splits on overflow, walks the tree for :meth:`search` and
+  :meth:`range`.
 
 Page layout
 -----------
@@ -21,13 +20,12 @@ on-wire layouts below overlap in their use of offset 0..4.  See
 :mod:`tinydb.index.btree_leaf` and :mod:`tinydb.index.btree_internal`
 for the per-type detail.
 
-Deferred to later tasks (T-4.3+): tree-walk :meth:`search`, deletion +
-rebalance, composite keys, catalog integration.
+Deferred to later tasks: :meth:`BTreeIndex.delete` (T-4.4), composite
+keys (T-4.5), catalog integration (T-4.6).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 from tinydb.errors import BTreeOverflowError  # re-exported below
@@ -37,12 +35,14 @@ from tinydb.types.system import TypeTag
 
 from tinydb.index.btree_internal import (
     InternalNode,
-    _read_internal,
+    _lower_bound,
+    _read_internal_from_bytes,
+    _upper_bound,
     _write_internal,
 )
 from tinydb.index.btree_leaf import (
     LeafNode,
-    _read_leaf,
+    _read_leaf_from_bytes,
     _write_leaf,
 )
 
@@ -105,12 +105,10 @@ class BTreeIndex:
         # leaf so the constructor remains zero-I/O; once we write any
         # node the type byte becomes authoritative.
         if node_type in (0x00, _LEAF_NODE_TYPE):
-            self._root_view = _read_leaf(
-                self._pager, self._root_pid, self._key_type
-            )
+            self._root_view = _read_leaf_from_bytes(page, self._root_pid)
         elif node_type == _INTERNAL_NODE_TYPE:
-            self._root_view = _read_internal(
-                self._pager, self._root_pid, self._key_type
+            self._root_view = _read_internal_from_bytes(
+                page, self._root_pid
             )
         else:
             raise ValueError(
@@ -121,39 +119,18 @@ class BTreeIndex:
 
     def _persist_root(self) -> None:
         """Write the in-memory root view back to the root page."""
-        if isinstance(self._root_view, LeafNode):
-            _write_leaf(
-                self._pager, self._root_pid, self._root_view, self._key_type
+        view = self._root_view
+        if isinstance(view, LeafNode):
+            _write_leaf(self._pager, self._root_pid, view, self._key_type)
+        elif isinstance(view, InternalNode):
+            _write_internal(
+                self._pager, self._root_pid, view, self._key_type
             )
         else:
-            assert self._root_view is not None
-            _write_internal(
-                self._pager, self._root_pid, self._root_view, self._key_type
+            raise RuntimeError(
+                f"cannot persist root at pid={self._root_pid}: "
+                f"view is None (insert not yet initialised)"
             )
-
-    @staticmethod
-    def _lower_bound(keys: list[Any], key: Any) -> int:
-        """Leftmost index where ``keys[i] >= key`` (``bisect_left``)."""
-        lo, hi = 0, len(keys)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if keys[mid] < key:
-                lo = mid + 1
-            else:
-                hi = mid
-        return lo
-
-    @staticmethod
-    def _upper_bound(keys: list[Any], key: Any) -> int:
-        """Leftmost index where ``keys[i] > key`` (``bisect_right``)."""
-        lo, hi = 0, len(keys)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if keys[mid] <= key:
-                lo = mid + 1
-            else:
-                hi = mid
-        return lo
 
     # -- tree-walk primitives --------------------------------------------
 
@@ -165,7 +142,7 @@ class BTreeIndex:
         bound.  Returns ``len(children) - 1`` if ``key`` is larger than
         every separator.
         """
-        idx = self._upper_bound(internal.keys, key)
+        idx = _upper_bound(internal.keys, key)
         return min(idx, len(internal.children) - 1)
 
     # -- split helpers ---------------------------------------------------
@@ -227,30 +204,52 @@ class BTreeIndex:
     # -- public API ------------------------------------------------------
 
     def search(self, key: Any) -> list[Rid]:
-        """Return every rid whose key equals ``key``.
+        """Return every rid whose key equals ``key`` (O(log n + k)).
 
-        Placeholder — the real tree-walk search arrives in T-4.3.
+        Descends from the root through internal nodes, choosing the
+        child whose subtree may contain ``key``, and finally scans
+        the matching leaf for all entries with that key.  Duplicates
+        are returned in insertion order.
         """
-        raise NotImplementedError("search via tree walk arrives in T-4.3")
+        if self._root_view is None:
+            self._ensure_loaded()
+        node: LeafNode | InternalNode | None = self._root_view
+        if node is None:
+            return []
+        pid = self._root_pid
+        while isinstance(node, InternalNode):
+            child_idx = self._find_child(key, node)
+            pid = node.children[child_idx]
+            node = self._read_node_view(pid)
+        if not isinstance(node, LeafNode):
+            raise RuntimeError(
+                f"expected leaf at pid={pid}, got "
+                f"{type(node).__name__}"
+            )
+        leaf = node
+        start = _lower_bound(leaf.keys, key)
+        end = _upper_bound(leaf.keys, key)
+        return list(leaf.rids[start:end])
 
     def range(
         self, lo: Any, hi: Any, *, inclusive: bool = True
     ) -> Iterator[Rid]:
         """Yield rids whose keys lie in ``[lo, hi]`` (or ``[lo, hi)``).
 
-        For T-4.2 the tree's leaves are reached through ``root_pid``,
-        which after the first split points at an internal node.  We
-        descend to the leftmost leaf whose key might satisfy ``lo`` and
-        then walk the sibling chain via ``next_leaf_pid`` until the
-        leaves' keys cross ``hi``.  T-4.3 will replace this with a true
-        tree walk that can also search by ``key`` directly.
+        Descends to the leftmost leaf whose key is ``>= lo``, then
+        walks the sibling chain via ``next_leaf_pid`` until the
+        leaves' keys cross ``hi``.  The starting leaf is found via
+        tree descent (T-4.3) rather than by blindly reading the
+        root, so multi-leaf indexes land on the correct leaf for
+        any ``lo`` value.
         """
         if lo > hi:
             return
-        self._ensure_loaded()
+        if self._root_view is None:
+            self._ensure_loaded()
         leaf = self._descend_to_first_leaf(lo)
         while leaf is not None:
-            start = self._lower_bound(leaf.keys, lo)
+            start = _lower_bound(leaf.keys, lo)
             for i in range(start, len(leaf.keys)):
                 key = leaf.keys[i]
                 if inclusive:
@@ -262,28 +261,28 @@ class BTreeIndex:
                 yield leaf.rids[i]
             if leaf.next_leaf_pid == NO_NEXT:
                 return
-            leaf = _read_leaf(self._pager, leaf.next_leaf_pid, self._key_type)
+            leaf = _read_leaf_from_bytes(
+                self._pager.read_page(leaf.next_leaf_pid), leaf.next_leaf_pid
+            )
 
     def _descend_to_first_leaf(self, key: Any) -> LeafNode | None:
         """Walk the tree from the root, descending into the child whose
         subtree may contain ``key``.  Returns the leaf that owns the
         leftmost matching key (or ``None`` if the tree is empty).
         """
-        node: LeafNode | InternalNode = self._root_view  # type: ignore[assignment]
-        pid = self._root_pid
+        if self._root_view is None:
+            self._ensure_loaded()
+        node = self._root_view
+        if node is None:
+            return None
         while isinstance(node, InternalNode):
             child_idx = self._find_child(key, node)
             pid = node.children[child_idx]
-            page = self._pager.read_page(pid)
-            node_type = page[0]
-            if node_type in (0x00, _LEAF_NODE_TYPE):
-                node = _read_leaf(self._pager, pid, self._key_type)
-            elif node_type == _INTERNAL_NODE_TYPE:
-                node = _read_internal(self._pager, pid, self._key_type)
-            else:
-                raise ValueError(
-                    f"page {pid} has unknown node_type 0x{node_type:02x}"
-                )
+            node = self._read_node_view(pid)
+        if not isinstance(node, LeafNode):
+            raise RuntimeError(
+                f"expected leaf at descent, got {type(node).__name__}"
+            )
         return node
 
     def insert(self, key: Any, rid: Rid) -> None:
@@ -315,7 +314,7 @@ class BTreeIndex:
         ``(push_up_key, right_pid)`` if this node split, else ``None``.
         """
         if isinstance(node, LeafNode):
-            pos = self._upper_bound(node.keys, key)
+            pos = _upper_bound(node.keys, key)
             node.keys.insert(pos, key)
             node.rids.insert(pos, rid)
             try:
@@ -327,7 +326,11 @@ class BTreeIndex:
                 )
                 return push_up_key, right_pid
         # Internal node: descend.
-        assert isinstance(node, InternalNode)
+        if not isinstance(node, InternalNode):
+            raise RuntimeError(
+                f"_insert_into: expected InternalNode at pid={pid}, "
+                f"got {type(node).__name__}"
+            )
         child_idx = self._find_child(key, node)
         child_pid = node.children[child_idx]
         child_node = self._read_node_view(child_pid)
@@ -348,13 +351,19 @@ class BTreeIndex:
             return up_key, new_right
 
     def _read_node_view(self, pid: int) -> LeafNode | InternalNode:
-        """Read a single page and return it as a leaf or internal node."""
+        """Read a single page and return it as a leaf or internal node.
+
+        Reads the page exactly once and dispatches on the type byte
+        before handing the bytes to the from-bytes reader.  This
+        avoids the double-page-read that an earlier T-4.2 path
+        incurred (NIT #4).
+        """
         page = self._pager.read_page(pid)
         node_type = page[0]
         if node_type in (0x00, _LEAF_NODE_TYPE):
-            return _read_leaf(self._pager, pid, self._key_type)
+            return _read_leaf_from_bytes(page, pid)
         if node_type == _INTERNAL_NODE_TYPE:
-            return _read_internal(self._pager, pid, self._key_type)
+            return _read_internal_from_bytes(page, pid)
         raise ValueError(
             f"page {pid} has unknown node_type 0x{node_type:02x}"
         )

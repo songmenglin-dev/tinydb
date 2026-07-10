@@ -30,7 +30,7 @@ from tinydb.types.system import TypeTag
 # Sentinel for "no sibling leaf" (also re-exported from btree).
 NO_NEXT: int = 0xFFFFFFFF
 
-__all__ = ["LeafNode", "NO_NEXT", "_read_leaf", "_write_leaf"]
+__all__ = ["LeafNode", "NO_NEXT", "_read_leaf", "_read_leaf_from_bytes", "_write_leaf"]
 
 # Header layout (kept in sync with btree_internal.py).
 _LEAF_NODE_TYPE: int = 0x01
@@ -104,20 +104,29 @@ def _write_leaf(pager: Pager, pid: int, leaf: LeafNode, key_type: TypeTag) -> No
     pager.write_page(pid, bytes(page))
 
 
-def _read_leaf(pager: Pager, pid: int, key_type: TypeTag) -> LeafNode:
+def _read_leaf(pager: Pager, pid: int) -> LeafNode:
     """Decode page ``pid`` into a :class:`LeafNode`.
 
-    The ``key_type`` argument is kept for symmetry with the internal
-    reader but unused — the on-wire tag byte at the front of each
-    encoded key is authoritative.
+    Thin wrapper that reads the page and delegates to
+    :func:`_read_leaf_from_bytes`.  Callers that already hold the
+    page bytes (e.g. ``_read_node_view`` after type-byte inspection)
+    should call the from-bytes variant to avoid a second read.
 
     Accepts a 0x00 type byte (freshly allocated, never written) as an
     empty leaf for T-4.1 backward compatibility.  Also coerces a
     zero-filled ``next_leaf_pid`` to :data:`NO_NEXT` (NIT #1) so chain
     walking never dereferences page 0.
     """
-    del key_type  # on-wire tag is authoritative
-    page = pager.read_page(pid)
+    return _read_leaf_from_bytes(pager.read_page(pid), pid)
+
+
+def _read_leaf_from_bytes(page: bytes, pid: int) -> LeafNode:
+    """Decode an already-read leaf ``page`` into a :class:`LeafNode`.
+
+    The on-wire tag byte at offset 0 is authoritative; no separate
+    ``key_type`` argument is needed.  See :func:`_read_leaf` for the
+    backward-compat coercion of a stale ``next_leaf_pid == 0``.
+    """
     node_type = page[0]
     if node_type not in (0x00, _LEAF_NODE_TYPE):
         raise ValueError(
