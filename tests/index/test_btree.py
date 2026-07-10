@@ -1048,3 +1048,214 @@ def test_delete_persists_across_reopen(tmp_db_path):
             assert idx2.search(i) == [rids[i]]
     finally:
         p2.close()
+
+
+# --- composite (tuple) keys (T-4.5) -------------------------------------
+#
+# These tests verify that BTreeIndex handles composite (tuple) keys
+# correctly.  Python's natural tuple comparison is lexicographic, so the
+# existing _lower_bound / _upper_bound helpers Just Work on tuples
+# without code changes; the tests below prove that and exercise the
+# prefix-search semantics that fall out naturally from tuple ordering.
+#
+# The BTreeIndex takes a single key_type at construction; the codec does
+# not yet have a dedicated composite tag, so we use TypeTag.Json.  Tuples
+# roundtrip through JSON as lists, so the on-disk form is a JSON array
+# of the tuple's elements.  We do not reopen the database in these
+# tests, so the in-memory keys retain their tuple shape — the comparison
+# and search behaviour is the same as for lists of the same elements.
+
+
+def test_composite_range_with_full_tuple_keys(tmp_db_path):
+    """Insert 3 entries with (last, first) tuple keys; range between
+    two full tuples returns only the entries whose keys lie in the
+    half-open interval.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)  # Smith, Alice
+        rid_b = Rid(page_id=4, slot_id=1)  # Smith, Bob
+        rid_c = Rid(page_id=4, slot_id=2)  # Jones, Carol
+        idx.insert(("Smith", "Alice"), rid_a)
+        idx.insert(("Smith", "Bob"), rid_b)
+        idx.insert(("Jones", "Carol"), rid_c)
+        # Smith/A → Smith/Z covers both Smith entries; Jones is below.
+        assert list(idx.range(("Smith", "A"), ("Smith", "Z"))) == [rid_a, rid_b]
+    finally:
+        p.close()
+
+
+def test_composite_prefix_range_returns_matching_prefix(tmp_db_path):
+    """``range(("Smith",), ("Smith",), inclusive=True)`` returns every
+    entry whose first element equals "Smith", regardless of the second
+    element.  This is the prefix-search semantics that falls out of
+    tuple comparison: ``("Smith", anything) < ("Smith",)`` is True iff
+    ``"Smith" < "Smith"`` (False), so the lower bound lands on the
+    first Smith entry and the upper bound falls off the end of the
+    Smith block.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)  # Smith, Alice
+        rid_b = Rid(page_id=4, slot_id=1)  # Smith, Bob
+        rid_c = Rid(page_id=4, slot_id=2)  # Jones, Carol
+        rid_d = Rid(page_id=4, slot_id=3)  # Tay, Dave
+        rid_e = Rid(page_id=4, slot_id=4)  # Smith, Eve
+        # Insert in mixed order to exercise the sort.
+        idx.insert(("Smith", "Bob"), rid_b)
+        idx.insert(("Jones", "Carol"), rid_c)
+        idx.insert(("Tay", "Dave"), rid_d)
+        idx.insert(("Smith", "Alice"), rid_a)
+        idx.insert(("Smith", "Eve"), rid_e)
+        smith_rids = [rid_a, rid_b, rid_e]
+        assert list(idx.range(("Smith",), ("Smith",), inclusive=True)) == smith_rids
+        assert list(idx.range(("Smith",), ("Smith",), inclusive=False)) == []
+    finally:
+        p.close()
+
+
+def test_composite_cross_prefix_range_lex_order(tmp_db_path):
+    """``range(("Smith",), ("Tay",))`` returns entries with last names
+    in the half-open range ``["Smith", "Tay")`` — i.e. all "Smith"
+    entries plus any entries whose last is strictly between Smith and
+    Tay.  This verifies lexicographic comparison: tuples sort
+    position-by-position.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)  # Smith, Alice
+        rid_b = Rid(page_id=4, slot_id=1)  # Smith, Bob
+        rid_c = Rid(page_id=4, slot_id=2)  # Jones, Carol
+        rid_d = Rid(page_id=4, slot_id=3)  # Tay, Dave
+        idx.insert(("Smith", "Bob"), rid_b)
+        idx.insert(("Jones", "Carol"), rid_c)
+        idx.insert(("Tay", "Dave"), rid_d)
+        idx.insert(("Smith", "Alice"), rid_a)
+        # Tay is excluded (inclusive=True but Tay is the upper bound
+        # itself; the half-open comparison places it at the end).
+        # Cross-prefix: all Smiths come back, Jones is below Smith.
+        assert list(idx.range(("Smith",), ("Tay",))) == [rid_a, rid_b]
+    finally:
+        p.close()
+
+
+def test_composite_search_by_full_tuple_hit(tmp_db_path):
+    """``search((last, first))`` returns the single matching rid when
+    a full composite key matches an inserted entry.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)
+        rid_b = Rid(page_id=4, slot_id=1)
+        rid_c = Rid(page_id=4, slot_id=2)
+        idx.insert(("Smith", "Alice"), rid_a)
+        idx.insert(("Smith", "Bob"), rid_b)
+        idx.insert(("Jones", "Carol"), rid_c)
+        assert idx.search(("Smith", "Alice")) == [rid_a]
+        assert idx.search(("Jones", "Carol")) == [rid_c]
+    finally:
+        p.close()
+
+
+def test_composite_search_by_full_tuple_miss(tmp_db_path):
+    """A full-tuple search that does not match any entry returns ``[]``."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)
+        idx.insert(("Smith", "Alice"), rid_a)
+        # No entry has first_name == "Zelda".
+        assert idx.search(("Smith", "Zelda")) == []
+    finally:
+        p.close()
+
+
+def test_composite_search_scalar_against_tuple_keys_returns_empty(tmp_db_path):
+    """Searching with a scalar key against a tree of tuple keys must
+    return ``[]`` rather than raise ``TypeError``.  Python 3 does not
+    permit ``tuple < int`` comparisons, so the BTreeIndex must catch
+    the type mismatch and treat it as "no match".
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)
+        rid_b = Rid(page_id=4, slot_id=1)
+        idx.insert((1, "a"), rid_a)
+        idx.insert((1, "b"), rid_b)
+        # The scalar ``1`` does not match any tuple — must not raise.
+        assert idx.search(1) == []
+    finally:
+        p.close()
+
+
+def test_composite_range_scalar_bounds_against_tuple_keys_returns_empty(
+    tmp_db_path,
+):
+    """A scalar range over a tree of tuple keys returns ``[]`` rather
+    than raise ``TypeError``.  Tuple ordering and scalar ordering are
+    not comparable, so the BTreeIndex must catch the type mismatch.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)
+        rid_b = Rid(page_id=4, slot_id=1)
+        idx.insert((1, "a"), rid_a)
+        idx.insert((1, "b"), rid_b)
+        # Scalar range over tuple keys — must not raise.
+        assert list(idx.range(0, 5)) == []
+    finally:
+        p.close()
+
+
+def test_composite_delete_by_full_tuple_removes_entry(tmp_db_path):
+    """Delete by full composite key removes the entry; other entries
+    with the same prefix are not affected.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Json)
+        rid_a = Rid(page_id=4, slot_id=0)
+        rid_b = Rid(page_id=4, slot_id=1)
+        rid_c = Rid(page_id=4, slot_id=2)
+        idx.insert(("Smith", "Alice"), rid_a)
+        idx.insert(("Smith", "Bob"), rid_b)
+        idx.insert(("Jones", "Carol"), rid_c)
+        idx.delete(("Smith", "Alice"), rid_a)
+        # Smith/Alice gone; Smith/Bob and Jones/Carol remain.
+        assert idx.search(("Smith", "Alice")) == []
+        assert idx.search(("Smith", "Bob")) == [rid_b]
+        assert idx.search(("Jones", "Carol")) == [rid_c]
+        # Prefix range still returns the surviving Smith entry.
+        assert list(idx.range(("Smith",), ("Smith",), inclusive=True)) == [rid_b]
+    finally:
+        p.close()

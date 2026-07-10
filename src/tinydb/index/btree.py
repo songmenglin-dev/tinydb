@@ -1,34 +1,19 @@
-"""B-tree index — leaves, internal nodes, split algorithm, delete + rebalance.
+"""B-tree index — leaves, internal nodes, split, delete, rebalance.
 
 The leaf / internal page layouts and (de)serialisers live in
-:mod:`tinydb.index.btree_leaf` and :mod:`tinydb.index.btree_internal`
-respectively; this module owns the cross-cutting pieces:
-
-* :class:`BTreeIndex` — the public index class.  Holds the root page
-  id and a lazy view of the root node (leaf or internal), runs
-  inserts, splits on overflow, walks the tree for :meth:`search` and
-  :meth:`range`, and removes entries with full rebalance on
-  :meth:`delete`.
-
-The split helpers (:func:`tinydb.index.btree_split.split_leaf`,
-:func:`~tinydb.index.btree_split.split_internal`) and the
-delete + rebalance helpers (:mod:`tinydb.index.btree_delete`) are
-extracted to dedicated modules to keep this file under the 400-line
-cap once both pieces landed.
-
-Page layout
------------
+:mod:`tinydb.index.btree_leaf` and :mod:`tinydb.index.btree_internal`;
+this module owns the cross-cutting :class:`BTreeIndex` class and the
+public API (insert, search, range, delete, flush).
 
 Every node page is one :data:`~tinydb.storage.pager.PAGE_SIZE` byte
 buffer.  The very first byte is a node-type tag (0x01 leaf, 0x02
-internal) so the reader can dispatch to the right layout; this is the
-only deviation from the T-4.1 layout, and is needed because the two
+internal) so the reader can dispatch to the right layout; this is
+the only deviation from the T-4.1 layout, needed because the two
 on-wire layouts below overlap in their use of offset 0..4.  See
 :mod:`tinydb.index.btree_leaf` and :mod:`tinydb.index.btree_internal`
 for the per-type detail.
 
-Deferred to later tasks: composite keys (T-4.5), catalog integration
-(T-4.6).
+Deferred to later tasks: catalog integration (T-4.6).
 """
 
 from __future__ import annotations
@@ -43,6 +28,7 @@ from tinydb.types.system import TypeTag
 from tinydb.index import btree_delete
 from tinydb.index.btree_internal import (
     InternalNode,
+    _is_past_upper,
     _lower_bound,
     _read_internal_from_bytes,
     _upper_bound,
@@ -58,8 +44,7 @@ from tinydb.index.btree_split import split_internal, split_leaf
 # Sentinel: no sibling leaf / tail marker for the sibling chain.
 NO_NEXT: int = 0xFFFFFFFF
 
-# Node-type tag bytes (offset 0 of every node page).  Re-exported from
-# here so callers can introspect a page type via ``btree._LEAF_NODE_TYPE``.
+# Node-type tag bytes (offset 0 of every node page).
 _LEAF_NODE_TYPE: int = 0x01
 _INTERNAL_NODE_TYPE: int = 0x02
 
@@ -102,16 +87,11 @@ class BTreeIndex:
 
     The :data:`ORDER`, :data:`MIN_LEAF_ENTRIES`, :data:`MIN_INTERNAL_KEYS`
     and :data:`MIN_INTERNAL_CHILDREN` constants are exposed both as
-    module globals and as class attributes so tests can ``from
-    tinydb.index.btree import BTreeIndex, MIN_LEAF_ENTRIES`` and
-    reference either side.
-
-    Deferred to later tasks: composite keys (T-4.5), catalog
-    integration (T-4.6).
+    module globals and as class attributes.  Deferred to later tasks:
+    catalog integration (T-4.6).
     """
 
-    # Expose order constants as class attributes too — convenient for
-    # callers using ``BTreeIndex.ORDER`` instead of importing the module.
+    # Expose order constants as class attributes too.
     ORDER: int = ORDER
     MIN_LEAF_ENTRIES: int = MIN_LEAF_ENTRIES
     MIN_INTERNAL_KEYS: int = MIN_INTERNAL_KEYS
@@ -122,8 +102,7 @@ class BTreeIndex:
         self._root_pid = root_pid
         self._key_type = key_type
         self._loaded: bool = False
-        # Cached root view: either a :class:`LeafNode` or an
-        # :class:`InternalNode` once ``_ensure_loaded`` runs.
+        # Cached root view, populated lazily by ``_ensure_loaded``.
         self._root_view: LeafNode | InternalNode | None = None
 
     # -- helpers ---------------------------------------------------------
@@ -133,10 +112,7 @@ class BTreeIndex:
             return
         page = self._pager.read_page(self._root_pid)
         node_type = page[0]
-        # Backward compat: a freshly-allocated page is all zeros, which
-        # used to mean "empty leaf" under T-4.1.  Treat 0x00 as a fresh
-        # leaf so the constructor remains zero-I/O; once we write any
-        # node the type byte becomes authoritative.
+        # 0x00 = fresh page (zero-I/O ``__init__``); 0x01 = leaf.
         if node_type in (0x00, _LEAF_NODE_TYPE):
             self._root_view = _read_leaf_from_bytes(page, self._root_pid)
         elif node_type == _INTERNAL_NODE_TYPE:
@@ -162,7 +138,7 @@ class BTreeIndex:
         else:
             raise RuntimeError(
                 f"cannot persist root at pid={self._root_pid}: "
-                f"view is None (insert not yet initialised)"
+                "view is None (insert not yet initialised)"
             )
 
     # -- tree-walk primitives --------------------------------------------
@@ -172,8 +148,8 @@ class BTreeIndex:
 
         Children are left-inclusive: ``children[i]`` contains all keys
         ``< keys[i]`` (for ``i > 0``); the rightmost child has no upper
-        bound.  Returns ``len(children) - 1`` if ``key`` is larger than
-        every separator.
+        bound.  Returns ``len(children) - 1`` if ``key`` exceeds every
+        separator.
         """
         idx = _upper_bound(internal.keys, key)
         return min(idx, len(internal.children) - 1)
@@ -183,68 +159,85 @@ class BTreeIndex:
     def search(self, key: Any) -> list[Rid]:
         """Return every rid whose key equals ``key`` (O(log n + k)).
 
-        Descends from the root through internal nodes, choosing the
-        child whose subtree may contain ``key``, and finally scans
-        the matching leaf for all entries with that key.  Duplicates
-        are returned in insertion order.
+        ``key`` may be a scalar or a tuple (composite key, e.g.
+        ``("Smith", "Alice")``); tuple comparison is lexicographic.
+        Descends from the root through internal nodes, then scans
+        the matching leaf for all entries with that key.
+        Duplicates are returned in insertion order.  A search whose
+        key type is not comparable to the index's key type returns
+        ``[]`` rather than raising ``TypeError``.
         """
-        if self._root_view is None:
-            self._ensure_loaded()
-        node: LeafNode | InternalNode | None = self._root_view
-        if node is None:
+        try:
+            if self._root_view is None:
+                self._ensure_loaded()
+            node: LeafNode | InternalNode | None = self._root_view
+            if node is None:
+                return []
+            pid = self._root_pid
+            while isinstance(node, InternalNode):
+                child_idx = self._find_child(key, node)
+                pid = node.children[child_idx]
+                node = self._read_node_view(pid)
+            if not isinstance(node, LeafNode):
+                raise RuntimeError(
+                    f"expected leaf at pid={pid}, got "
+                    f"{type(node).__name__}"
+                )
+            leaf = node
+            start = _lower_bound(leaf.keys, key)
+            end = _upper_bound(leaf.keys, key)
+            return list(leaf.rids[start:end])
+        except TypeError:
             return []
-        pid = self._root_pid
-        while isinstance(node, InternalNode):
-            child_idx = self._find_child(key, node)
-            pid = node.children[child_idx]
-            node = self._read_node_view(pid)
-        if not isinstance(node, LeafNode):
-            raise RuntimeError(
-                f"expected leaf at pid={pid}, got "
-                f"{type(node).__name__}"
-            )
-        leaf = node
-        start = _lower_bound(leaf.keys, key)
-        end = _upper_bound(leaf.keys, key)
-        return list(leaf.rids[start:end])
 
     def range(
         self, lo: Any, hi: Any, *, inclusive: bool = True
     ) -> Iterator[Rid]:
         """Yield rids whose keys lie in ``[lo, hi]`` (or ``[lo, hi)``).
 
-        Descends to the leftmost leaf whose key is ``>= lo``, then
-        walks the sibling chain via ``next_leaf_pid`` until the
-        leaves' keys cross ``hi``.  The starting leaf is found via
-        tree descent (T-4.3) rather than by blindly reading the
-        root, so multi-leaf indexes land on the correct leaf for
-        any ``lo`` value.
+        ``lo`` and ``hi`` may be scalars or tuples (composite keys);
+        tuple comparison is lexicographic.  Descends to the leftmost
+        leaf whose key is ``>= lo`` (tree descent, T-4.3), then
+        walks the sibling chain.
+
+        Prefix-bound semantics (T-4.5): when ``lo == hi`` and
+        ``inclusive=True`` the bound is treated as a prefix, so
+        ``range(("Smith",), ("Smith",), inclusive=True)`` yields
+        every entry whose key starts with ``("Smith",)``.  A
+        ``TypeError`` from an incompatible comparison is caught and
+        the iterator yields nothing.
         """
-        if lo > hi:
+        # lo == hi with inclusive=True means "prefix range".
+        try:
+            prefix_mode = (lo == hi) and inclusive
+        except TypeError:
             return
-        if self._root_view is None:
-            self._ensure_loaded()
-        leaf = self._descend_to_first_leaf(lo)
-        while leaf is not None:
-            start = _lower_bound(leaf.keys, lo)
-            for i in range(start, len(leaf.keys)):
-                key = leaf.keys[i]
-                if inclusive:
-                    if key > hi:
-                        return
-                else:
-                    if key >= hi:
-                        return
-                yield leaf.rids[i]
-            if leaf.next_leaf_pid == NO_NEXT:
+        try:
+            if lo > hi:
                 return
-            leaf = _read_leaf_from_bytes(
-                self._pager.read_page(leaf.next_leaf_pid), leaf.next_leaf_pid
-            )
+            if self._root_view is None:
+                self._ensure_loaded()
+            leaf = self._descend_to_first_leaf(lo)
+            while leaf is not None:
+                start = _lower_bound(leaf.keys, lo)
+                for i in range(start, len(leaf.keys)):
+                    key = leaf.keys[i]
+                    if _is_past_upper(
+                        key, hi, inclusive, prefix_mode=prefix_mode
+                    ):
+                        return
+                    yield leaf.rids[i]
+                if leaf.next_leaf_pid == NO_NEXT:
+                    return
+                leaf = _read_leaf_from_bytes(
+                    self._pager.read_page(leaf.next_leaf_pid),
+                    leaf.next_leaf_pid,
+                )
+        except TypeError:
+            return
 
     def _descend_to_first_leaf(self, key: Any) -> LeafNode | None:
-        """Walk the tree from the root, descending into the child whose
-        subtree may contain ``key``.  Returns the leaf that owns the
+        """Walk the tree from the root to the leaf that owns the
         leftmost matching key (or ``None`` if the tree is empty).
         """
         if self._root_view is None:
@@ -263,7 +256,13 @@ class BTreeIndex:
         return node
 
     def insert(self, key: Any, rid: Rid) -> None:
-        """Insert ``(key, rid)``; splits nodes on overflow."""
+        """Insert ``(key, rid)``; splits nodes on overflow.
+
+        ``key`` may be a scalar or a tuple (composite key); the tree
+        is kept sorted by Python's natural ``<`` ordering, which is
+        lexicographic for tuples.
+        """
+        self._ensure_loaded()
         self._ensure_loaded()
         split = self._insert_into(self._root_pid, self._root_view, key, rid)
         if split is not None:
@@ -352,15 +351,15 @@ class BTreeIndex:
 
         * Silent no-op when ``(key, rid)`` is not present — matches
           ``dict.pop(key, None)`` semantics.  No exception is raised.
-        * On underflow, prefer borrowing from the left sibling (keeps
-          the parent separator stable); fall back to merging with the
-          right sibling (right wins — the child page becomes orphan).
+        * On underflow, prefer borrowing from the left sibling
+          (keeps the parent separator stable); fall back to merging
+          with the right sibling (right wins — child page orphan).
         * Root collapse: if the root is an internal node left with a
           single child after a merge, that child takes over as root.
 
         Duplicates: only the specific ``rid`` under ``key`` is
-        removed; other rids for the same key remain in insertion
-        order.
+        removed.  ``key`` may be a scalar or a tuple (composite
+        key); tuple comparison is lexicographic.
         """
         self._ensure_loaded()
         if self._root_view is None:

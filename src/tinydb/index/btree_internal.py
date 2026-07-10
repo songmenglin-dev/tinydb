@@ -33,6 +33,7 @@ from tinydb.types.system import TypeTag
 
 __all__ = [
     "InternalNode",
+    "_is_past_upper",
     "_lower_bound",
     "_read_internal",
     "_read_internal_from_bytes",
@@ -92,6 +93,42 @@ def _upper_bound(keys: list[Any], key: Any) -> int:
         else:
             hi = mid
     return lo
+
+
+def _is_past_upper(
+    key: Any, hi: Any, inclusive: bool, *, prefix_mode: bool = False
+) -> bool:
+    """True if ``key`` is past the upper bound ``hi`` for a range scan.
+
+    Standard comparison: ``key > hi`` when ``inclusive`` is True,
+    ``key >= hi`` when False.  A comparison that raises ``TypeError``
+    (e.g. ``tuple < int`` in Python 3) is treated as past the bound
+    so the walk terminates cleanly when the caller's key type is
+    incompatible with the index's key type.
+
+    Prefix-bound semantics (T-4.5): when ``prefix_mode`` is True and
+    both ``key`` and ``hi`` are tuples with ``hi`` a strict prefix of
+    ``key`` (``key[:len(hi)] == hi`` and ``len(key) > len(hi)``), the
+    key is in the prefix range and is *not* past the bound.  The
+    caller enables ``prefix_mode`` only for the ``lo == hi`` case
+    where the bound is meant to be a prefix (e.g.
+    ``range(("Smith",), ("Smith",), inclusive=True)`` yields every
+    entry whose first element is ``"Smith"``).
+    """
+    try:
+        past = key > hi if inclusive else key >= hi
+    except TypeError:
+        return True
+    if not past:
+        return False
+    if prefix_mode and (
+        isinstance(hi, tuple)
+        and isinstance(key, tuple)
+        and len(key) > len(hi)
+        and key[: len(hi)] == hi
+    ):
+        return False
+    return True
 
 
 def _write_internal(
