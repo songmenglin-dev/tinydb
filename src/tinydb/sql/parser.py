@@ -28,6 +28,9 @@ head token so the caller can dispatch to a sibling parser.
 
 from __future__ import annotations
 
+import datetime
+import json
+from decimal import Decimal
 from typing import List, Optional
 
 from tinydb.errors import ParseError
@@ -46,17 +49,39 @@ from tinydb.sql.ast import (
     Select,
     Star,
     Statement,
+    TypedLiteral,
     UnaryOp,
     Update,
 )
 from tinydb.sql.tokens import Token, TokenKind
-from tinydb.types.system import Column, parse_type_name
+from tinydb.types.system import Column, TypeTag, parse_type_name
 
 
 # Operator sets used by the expression precedence ladder.
 _COMPARISON_OPS: frozenset = frozenset({"=", "!=", "<", "<=", ">", ">="})
 _ADDITIVE_OPS: frozenset = frozenset({"+", "-"})
 _MULTIPLICATIVE_OPS: frozenset = frozenset({"*", "/"})
+
+
+# Mapping from typed-literal keyword → (TypeTag, parser).  Each parser
+# takes the raw string content (without the surrounding quotes) and
+# returns the corresponding Python native value, raising ParseError on
+# malformed input.
+_TYPED_LITERAL_PARSERS: dict = {
+    "DATE": (TypeTag.Date, lambda s: datetime.date.fromisoformat(s)),
+    "TIME": (TypeTag.Time, lambda s: datetime.time.fromisoformat(s)),
+    "DATETIME": (
+        TypeTag.Datetime,
+        # datetime.fromisoformat accepts both 'YYYY-MM-DD' and
+        # 'YYYY-MM-DDTHH:MM:SS[.ffffff]' but historically rejected the
+        # space-separated form until 3.11; we normalise ' ' → 'T' so
+        # both spellings parse on every supported Python version.
+        lambda s: datetime.datetime.fromisoformat(s.replace(" ", "T")),
+    ),
+    "DECIMAL": (TypeTag.Decimal, lambda s: Decimal(s)),
+    "BLOB": (TypeTag.Blob, lambda s: bytes.fromhex(s)),
+    "JSON": (TypeTag.Json, lambda s: json.loads(s)),
+}
 
 
 # --- cursor -------------------------------------------------------------
@@ -301,8 +326,23 @@ class _Parser:
         return tuple(vals)
 
     def _parse_value(self):
-        """A literal value in an INSERT VALUES list (no expressions)."""
-        return self._parse_literal().value
+        """A literal value in an INSERT VALUES list.
+
+        Accepts plain :class:`Literal` (unwrapped to its Python value)
+        AND type-prefixed :class:`TypedLiteral` (preserved as the AST
+        node so the executor can dispatch on the declared target tag —
+        REQ-TYP-9..14).  Arithmetic / column-ref expressions remain
+        rejected.
+        """
+        node = self._parse_primary()
+        if isinstance(node, TypedLiteral):
+            return node  # keep tag + value; executor picks it up
+        if isinstance(node, Literal):
+            return node.value
+        raise ParseError(
+            node.__class__.__name__, 0,
+            f"INSERT VALUES expects a literal, got expression node",
+        )
 
     # --- SELECT -----------------------------------------------------
 
@@ -541,6 +581,11 @@ class _Parser:
 
     def _parse_primary(self) -> Expr:
         tok = self._peek()
+        # Type-prefixed literals (DATE '...', DECIMAL '...', ...) — must
+        # be tried before the bare-literal branch because the leading
+        # token is a KEYWORD, not a *_LIT kind.
+        if tok.kind is TokenKind.KEYWORD and tok.value in _TYPED_LITERAL_PARSERS:
+            return self._parse_typed_literal(tok.value)
         # Literals — value already typed by the lexer.
         if tok.kind in (
             TokenKind.INT_LIT, TokenKind.FLOAT_LIT, TokenKind.STRING_LIT,
@@ -571,6 +616,34 @@ class _Parser:
             tok.line, tok.col,
             f"expected expression, got {tok.kind.name} {tok.value!r}",
         )
+
+    def _parse_typed_literal(self, keyword: str) -> TypedLiteral:
+        """Parse ``DATE '...'`` / ``DECIMAL '...'`` / etc. into a TypedLiteral.
+
+        The leading keyword has already been peeked; consume it, then
+        expect a single STRING_LIT, validate its content via the
+        keyword-specific parser in :data:`_TYPED_LITERAL_PARSERS`, and
+        return the wrapped node.  A missing string or a validation
+        failure raises ParseError at the offending token.
+        """
+        kw_tok = self._advance()
+        tag, value_parser = _TYPED_LITERAL_PARSERS[keyword]
+        str_tok = self._peek()
+        if str_tok.kind is not TokenKind.STRING_LIT:
+            raise ParseError(
+                str_tok.line, str_tok.col,
+                f"expected string literal after {keyword}, got "
+                f"{str_tok.kind.name} {str_tok.value!r}",
+            )
+        self._advance()
+        try:
+            value = value_parser(str_tok.value)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            raise ParseError(
+                str_tok.line, str_tok.col,
+                f"invalid {keyword} literal {str_tok.value!r}: {exc}",
+            ) from exc
+        return TypedLiteral(tag=tag, value=value)
 
     def _parse_literal(self) -> Literal:
         """Consume one literal token and wrap it in a Literal AST node."""
