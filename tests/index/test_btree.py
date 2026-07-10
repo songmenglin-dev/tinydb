@@ -1,7 +1,14 @@
-"""Tests for the B-tree leaf-only index (T-4.1).
+"""Tests for the B-tree index (T-4.1 leaf + T-4.2 split + internal nodes).
 
-Covers REQ-IDX-1 (leaf part): leaves contain (key, rid) pairs sorted
-ascending by key, with sibling-chain pointers for forward scan.
+Covers REQ-IDX-1 (leaf part) and the split / internal-node / persistence
+extensions added in T-4.2:
+
+* leaves contain (key, rid) pairs sorted ascending by key, with
+  sibling-chain pointers for forward scan;
+* internal nodes contain (separator_key, child_pid) entries;
+* ``_write_leaf`` / ``_write_internal`` raise :class:`BTreeOverflowError`
+  when the entry would not fit in the page, and the split algorithm
+  catches that signal and re-tries with two pages.
 """
 
 from __future__ import annotations
@@ -260,3 +267,194 @@ def test_module_reexports_btree_index():
     from tinydb.index.btree import BTreeIndex as BTreeIndexB
 
     assert BTreeIndexA is BTreeIndexB
+
+
+# --- T-4.2: split + internal nodes --------------------------------------
+
+
+# --- NIT #1 regression: tail-leaf sentinel -----------------------------
+
+
+def test_tail_leaf_persists_no_next_sentinel(tmp_db_path):
+    """NIT #1: a freshly-persisted tail leaf must carry ``NO_NEXT``, not 0.
+
+    With the T-4.1 code, a fresh leaf's on-disk ``next_leaf_pid`` is 0
+    (because the page was zero-filled).  After the split work in T-4.2
+    introduces siblings, the sibling chain has to use ``NO_NEXT``
+    (``0xFFFFFFFF``) as the tail marker or chain-walking code will read
+    page 0 as a valid sibling.
+    """
+    from tinydb.index.btree import BTreeIndex, NO_NEXT, _read_leaf
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Int)
+        idx.insert(42, Rid(page_id=4, slot_id=0))
+        idx.flush()
+    finally:
+        p.close()
+
+    p2 = Pager.open(tmp_db_path)
+    try:
+        leaf = _read_leaf(p2, pid, TypeTag.Int)
+        assert leaf.next_leaf_pid == NO_NEXT
+    finally:
+        p2.close()
+
+
+# --- NIT #2 regression: capacity guard + BTreeOverflowError -------------
+
+
+def test_write_leaf_capacity_guard_raises(tmp_db_path):
+    """NIT #2: ``_write_leaf`` raises ``BTreeOverflowError`` when full.
+
+    With 64-char Text keys, each entry is 77 bytes (2 + 69 + 6).  After
+    roughly 50 entries the page is full, so 60 entries must overflow
+    the 4 KB page and the new capacity guard must raise
+    :class:`BTreeOverflowError`.
+    """
+    from tinydb.index.btree import BTreeOverflowError, LeafNode, _write_leaf
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        keys = [f"k{i:064d}" for i in range(60)]
+        rids = [Rid(page_id=0, slot_id=i) for i in range(60)]
+        leaf = LeafNode(keys=keys, rids=rids)
+        with pytest.raises(BTreeOverflowError):
+            _write_leaf(p, pid, leaf, TypeTag.Text)
+    finally:
+        p.close()
+
+
+def test_btree_overflow_error_subclasses_tinydb_error():
+    """``BTreeOverflowError`` must subclass ``TinydbError`` so callers
+    can catch all tinydb errors uniformly.
+    """
+    from tinydb.errors import TinydbError
+    from tinydb.index.btree import BTreeOverflowError
+
+    assert issubclass(BTreeOverflowError, TinydbError)
+
+
+# --- split path: many inserts ------------------------------------------
+
+
+def test_split_with_many_int_keys_returns_all_in_order(tmp_db_path):
+    """Inserting more Int keys than fit on one leaf must split; range returns all.
+
+    A single leaf fits ~240 Int entries; 300 entries force at least one
+    split.  After the split, :meth:`range` must still yield every rid
+    in ascending key order.
+    """
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        for i in range(300):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+        result = list(idx.range(0, 1000))
+        assert result == [Rid(page_id=0, slot_id=i) for i in range(300)]
+    finally:
+        p.close()
+
+
+def test_split_persists_across_reopen(tmp_db_path):
+    """After a split, the tree must round-trip through close/reopen."""
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Int)
+        for i in range(300):
+            idx.insert(i, Rid(page_id=0, slot_id=i))
+    finally:
+        p.close()
+
+    p2 = Pager.open(tmp_db_path)
+    try:
+        idx2 = BTreeIndex(p2, root_pid=pid, key_type=TypeTag.Int)
+        assert list(idx2.range(0, 1000)) == [
+            Rid(page_id=0, slot_id=i) for i in range(300)
+        ]
+    finally:
+        p2.close()
+
+
+def test_root_becomes_internal_after_split(tmp_db_path):
+    """A root-leaf split must allocate a new internal-node root.
+
+    Inserting 100 long-Text keys (each ~80 bytes, so ~60 entries fit on
+    one leaf) forces a leaf split.  When the original root leaf splits,
+    the BTreeIndex must allocate a fresh page and rewrite the root_pid
+    to point at a real internal node.  ``_read_internal`` on the new
+    root_pid must yield a node with at least two children.
+    """
+    from tinydb.index.btree import BTreeIndex, _read_internal
+
+    p = Pager.open(tmp_db_path)
+    try:
+        pid = p.allocate_page()
+        idx = BTreeIndex(p, root_pid=pid, key_type=TypeTag.Text)
+        for i in range(100):
+            idx.insert(f"key-{i:060d}", Rid(page_id=0, slot_id=i))
+        # The root_pid must have moved to a real internal node.
+        assert idx._root_pid != pid
+        internal = _read_internal(p, idx._root_pid)
+        assert len(internal.children) >= 2
+        # And everything still reads back correctly.
+        result = list(idx.range("a", "z"))
+        assert len(result) == 100
+    finally:
+        p.close()
+
+
+def test_random_insert_order_preserves_range_order(tmp_db_path):
+    """Insert keys in random order; ``range`` returns rids sorted by key.
+
+    A tree-walking insert must keep the keys sorted regardless of the
+    order in which the caller supplied them.  This guards against an
+    off-by-one in the split / rebalance logic that would scramble the
+    in-order invariant.
+    """
+    import random
+
+    from tinydb.index.btree import BTreeIndex
+
+    p = Pager.open(tmp_db_path)
+    try:
+        idx, _pid = _make_index(p, TypeTag.Int)
+        # 300 Int keys → forces at least one split.  Use 300+ so the
+        # test really exercises the split path (which is where ordering
+        # regressions would show up).
+        keys = list(range(300))
+        random.seed(0xC0FFEE)
+        random.shuffle(keys)
+        for k in keys:
+            idx.insert(k, Rid(page_id=0, slot_id=k))
+        result = list(idx.range(0, 1000))
+        assert result == [Rid(page_id=0, slot_id=k) for k in range(300)]
+    finally:
+        p.close()
+
+
+# --- re-export surface --------------------------------------------------
+
+
+def test_module_reexports_internal_node_and_overflow_error():
+    """``tinydb.index`` must re-export ``InternalNode`` and
+    ``BTreeOverflowError`` so downstream code can ``from tinydb.index
+    import InternalNode``."""
+    from tinydb.index import BTreeIndex as BTreeIndexA
+    from tinydb.index import BTreeOverflowError, InternalNode
+    from tinydb.index.btree import (
+        BTreeOverflowError as BTreeOverflowErrorB,
+        InternalNode as InternalNodeB,
+    )
+
+    assert InternalNode is InternalNodeB
+    assert BTreeOverflowError is BTreeOverflowErrorB
+    assert BTreeIndexA.__module__ == "tinydb.index.btree"

@@ -88,10 +88,23 @@ class TypeMismatchError(TinydbError):
     """
 
 
+class BTreeOverflowError(TinydbError):
+    """Raised by the B-tree write path when an entry would not fit in
+    the remaining bytes of a page.
+
+    The insert path catches this signal and re-tries after
+    redistributing the data across two pages.  Defined in
+    :mod:`tinydb.errors` so the leaf and internal (de)serialisers can
+    raise it without creating a circular import into
+    :mod:`tinydb.index.btree`.
+    """
+
+
 __all__ = [
     "TinydbError",
     "ParseError",
     "ConstraintViolation",
     "NotNullViolation",
     "TypeMismatchError",
+    "BTreeOverflowError",
 ]
