@@ -7,6 +7,7 @@ Public surface (re-exported here for convenience)::
         Statement, CreateTable, DropTable, Insert, Select, Update, Delete,
         Expr, BinaryOp, UnaryOp, Literal, ColumnRef,
         Star, Assignment, OrderBy, Limit, GroupBy, Aggregate,
+        parse_ddl,
     )
 """
 
@@ -30,6 +31,7 @@ from tinydb.sql.ast import (
     UnaryOp,
     Update,
 )
+from tinydb.sql.parser import parse_ddl
 from tinydb.sql.tokens import KEYWORDS, Token, TokenKind, tokenize
 
 __all__ = [
@@ -54,5 +56,6 @@ __all__ = [
     "TokenKind",
     "UnaryOp",
     "Update",
+    "parse_ddl",
     "tokenize",
 ]

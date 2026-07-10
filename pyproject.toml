@@ -41,6 +41,8 @@ where = ["src"]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
+    "unit: marks unit tests (single module, no I/O)",
+    "integration: marks tests that touch real storage / disk",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "crash: marks recovery / fuzz tests that simulate crashes",
 ]

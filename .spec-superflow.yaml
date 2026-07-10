@@ -11,7 +11,7 @@ contract_hash: sha256:c96afb29d9ca7805419d037fb209dcd340a02eda24d4f86be7b99c155d
 
 # === Execution progress ===
 execution_mode: batch_inline
-batches_completed: 0
+batches_completed: 2
 test_result: null
 spec_merged: false
 
@@ -26,14 +26,14 @@ dp_0_decisions: change=.; intent=从零构建 Python 嵌入式关系型数据库
 dp_0_result: confirmed
 dp_0_confirmed: true
 dp_0_timestamp: 2026-07-09T09:22:31Z
-dp_1_result: null
-dp_1_timestamp: null
+dp_1_result: auto-inferred + dp_2/3 approved under full workflow; no hotfix/tweak downgrade warranted
+dp_1_timestamp: 2026-07-09T16:10:22Z
 dp_2_result: approved: 4 artifacts passed (proposal + 61 REQ specs + 13 decisions design + 47 tasks 9 batches)
 dp_2_timestamp: 2026-07-09T09:57:05Z
 dp_3_result: approved: 9 batches, 47 tasks, 13 design constraints, 5 escalation rules, 4 acceptance checks
 dp_3_timestamp: 2026-07-09T10:05:54Z
-dp_4_result: Batch Inline: Batch 1 only, 5 tasks in types/errors module, low risk, current session scope
-dp_4_timestamp: 2026-07-09T10:08:42Z
+dp_4_result: Batch Inline: B1+B2 closed in-line; B3 (SQL Parser, 7 sub-tasks, single module src/tinydb/sql/) stays Batch Inline — internal-only API surface, per-task TDD review covers risk. Escalation: B4+ (B-tree + executor + tx) cross-module → SDD.
+dp_4_timestamp: 2026-07-10T01:19:40Z
 dp_5_result: null
 dp_5_timestamp: null
 dp_6_result: null
