@@ -32,7 +32,9 @@ test = ["pytest>=7.0", "pytest-cov>=4.0"]
 tinydb = "tinydb.cli.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/example/tinydb"
+Homepage = "https://github.com/songmenglin-dev/tinydb"
+Repository = "https://github.com/songmenglin-dev/tinydb.git"
+Issues = "https://github.com/songmenglin-dev/tinydb/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

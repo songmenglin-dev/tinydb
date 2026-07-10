@@ -16,7 +16,7 @@ test_result: null
 spec_merged: false
 
 # === Metadata ===
-change_name: .
+change_name: tinydb
 last_transition: 2026-07-09T10:08:42.899Z
 last_transition_from: approved-for-build
 last_transition_to: executing
