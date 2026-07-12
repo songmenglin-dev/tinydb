@@ -100,6 +100,16 @@ class BTreeOverflowError(TinydbError):
     """
 
 
+class WALCorruptionError(TinydbError):
+    """Raised when a WAL frame CRC32 does not match its contents.
+
+    Indicates the file was tampered with or written by an incompatible
+    encoder.  Defined in :mod:`tinydb.errors` so the WAL implementation
+    can raise it without creating a circular import into
+    :mod:`tinydb.tx`.
+    """
+
+
 __all__ = [
     "TinydbError",
     "ParseError",
@@ -107,4 +117,5 @@ __all__ = [
     "NotNullViolation",
     "TypeMismatchError",
     "BTreeOverflowError",
+    "WALCorruptionError",
 ]
