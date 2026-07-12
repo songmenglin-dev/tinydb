@@ -15,7 +15,10 @@ freely.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterator, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Optional, Sequence
+
+if TYPE_CHECKING:
+    from tinydb.executor.planner import Executor
 
 
 # A row is a tuple of bytes-encoded column values in declared column order.
@@ -41,6 +44,17 @@ class Plan:
     def __iter__(self) -> Iterator[Row]:  # pragma: no cover - convenience
         return self.open(None)  # type: ignore[arg-type]
 
+    @property
+    def table(self) -> str:
+        """The base table this plan reads/writes.
+
+        Wrappers traverse to the leaf; leaf plans override to return
+        their own ``table`` attribute.
+        """
+        raise NotImplementedError(
+            f"table property not implemented for {type(self).__name__}"
+        )
+
 
 # ``op_name`` defaults below are set via ``field(default=...)`` because
 # dataclass() reads class annotations and a plain class attribute would
@@ -59,6 +73,18 @@ class SeqScan(Plan):
 
     table: str
     op_name: str = "SeqScan"
+
+    @property
+    def table(self) -> str:  # type: ignore[override]
+        return self.__dict__["table"]
+
+    def open(self, ctx: "Executor") -> Iterator[Row]:
+        from tinydb.executor.row_iter import TableScan
+
+        meta = ctx.catalog.get_table(self.table)
+        heap = ctx.heap_for(meta)
+        for _rid, row in TableScan(heap, meta):
+            yield row
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -88,6 +114,19 @@ class Filter(Plan):
     predicate: object  # Expr from tinydb.sql.ast
     op_name: str = "Filter"
 
+    @property
+    def table(self) -> str:  # type: ignore[override]
+        return self.src.table
+
+    def open(self, ctx: "Executor") -> Iterator[Row]:
+        from tinydb.executor.eval_expr import eval_expr
+
+        n2i = ctx.name_to_idx_for(self.table)
+        for row in self.src.open(ctx):
+            v = eval_expr(self.predicate, row, n2i)  # type: ignore[arg-type]
+            if v:
+                yield row
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Project(Plan):
@@ -96,11 +135,39 @@ class Project(Plan):
     For ``SELECT *`` the planner produces a Project listing every
     column of the table in declared order (so the executor sees a
     uniform shape regardless of the SQL form).
+
+    ``items`` is the parallel AST list (column name → source Expr) so
+    the executor can evaluate non-trivial projections (``SELECT 1+2``,
+    ``SELECT name FROM ...``).  For T-5.2 every ``item`` is either a
+    :class:`ColumnRef` / :class:`Literal` / :class:`TypedLiteral` /
+    :class:`BinaryOp` / :class:`UnaryOp`; aggregates (T-5.6) raise.
     """
 
     src: Plan
     columns: Sequence[str]
+    items: Sequence[object] = ()  # Expr nodes parallel to ``columns``
     op_name: str = "Project"
+
+    @property
+    def table(self) -> str:  # type: ignore[override]
+        return self.src.table
+
+    def open(self, ctx: "Executor") -> Iterator[Row]:
+        from tinydb.executor.eval_expr import eval_expr
+
+        n2i = ctx.name_to_idx_for(self.table)
+        for row in self.src.open(ctx):
+            out: list = []
+            for i, col_name in enumerate(self.columns):
+                if col_name in n2i:
+                    out.append(row[n2i[col_name]])
+                elif self.items and i < len(self.items):
+                    out.append(eval_expr(self.items[i], row, n2i))  # type: ignore[arg-type]
+                else:
+                    raise NotImplementedError(
+                        f"project column {col_name!r} has no source item"
+                    )
+            yield tuple(out)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

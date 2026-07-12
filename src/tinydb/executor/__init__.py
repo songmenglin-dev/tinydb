@@ -4,6 +4,7 @@ T-5.1 exposes the Plan dataclasses and the ``plan()`` AST translator;
 T-5.2..5.6 implement the row-producing executors.
 """
 
+from tinydb.executor.executor import Executor
 from tinydb.executor.ops import (
     Delete,
     Filter,
@@ -16,7 +17,7 @@ from tinydb.executor.ops import (
     Sort,
     Update,
 )
-from tinydb.executor.planner import Executor, plan
+from tinydb.executor.planner import plan
 
 __all__ = [
     "Executor",

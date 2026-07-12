@@ -281,11 +281,12 @@ def test_executor_symbol_exists(users_catalog):
 
     ex = Executor(catalog=users_catalog)
     assert ex.catalog is users_catalog
-    # T-5.1 forbids execution: .execute() must raise NotImplementedError
+    # T-5.2: SELECT execution is now implemented; the executor must
+    # return a list (empty here since the users table has no rows yet).
     stmt = parse("SELECT * FROM users")
     p = plan(stmt, users_catalog)
-    with pytest.raises(NotImplementedError):
-        ex.execute(p)
+    result = ex.execute(p)
+    assert isinstance(result, list)
 
 
 def test_index_scan_dataclass_shape():

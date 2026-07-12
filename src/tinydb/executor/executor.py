@@ -1,0 +1,81 @@
+"""Executor — drive a :class:`Plan` tree against a :class:`Catalog`.
+
+T-5.2 supports only ``SeqScan`` / ``Filter`` / ``Project``.  T-5.3
+adds ``IndexScan``; T-5.5 adds DML; T-5.6 adds aggregates.
+
+Split out of :mod:`tinydb.executor.planner` to keep the planner under
+its 280-line file cap.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+from tinydb.executor.ops import Plan
+from tinydb.storage.catalog import Catalog, TableMeta
+from tinydb.storage.heap import Heap
+from tinydb.storage.pager import Pager
+
+
+@dataclass
+class Executor:
+    """Drive a :class:`Plan` tree against a :class:`Catalog`.
+
+    The executor owns a per-table :class:`Heap` cache so repeated
+    ``SeqScan`` accesses don't re-bind a fresh heap.  Reads share a
+    single :class:`Pager` (passed at construction) so the catalog
+    and the heap pages see consistent bytes.
+    """
+
+    catalog: Catalog
+    pager: Optional[Pager] = None
+    _heaps: dict = field(default_factory=dict)
+
+    def execute(self, plan: Plan) -> list:
+        """Materialise the rows of ``plan`` into a list of tuples.
+
+        SELECT returns a flat list of row tuples (in projection order).
+        DML raises :class:`NotImplementedError` until T-5.5.
+        """
+        from tinydb.executor.ops import Delete, Insert, Sort, Update
+
+        if isinstance(plan, (Insert, Update, Delete)):
+            raise NotImplementedError(
+                f"execute: {type(plan).__name__} is not implemented in T-5.2"
+            )
+        if isinstance(plan, Sort):
+            raise NotImplementedError(
+                "execute: Sort is not implemented in T-5.2 (T-5.4)"
+            )
+        return list(plan.open(self))
+
+    def heap_for(self, meta: TableMeta) -> Heap:
+        """Return the Heap bound to ``meta``, creating it on first access.
+
+        Falls back to the catalog's pager when the executor was built
+        without one — the catalog and the heap share the same page
+        file, so this is safe in single-file deployments.
+        """
+        heap = self._heaps.get(meta.table_id)
+        if heap is not None:
+            return heap
+        pager = self.pager
+        if pager is None:
+            pager = getattr(self.catalog, "_pager", None)
+        if pager is None:
+            raise RuntimeError(
+                "Executor needs a Pager to bind heaps (pager=None)"
+            )
+        heap = Heap(pager, table_id=meta.table_id)
+        heap._head_pid = meta.heap_pid  # rebind to catalog's heap
+        self._heaps[meta.table_id] = heap
+        return heap
+
+    def name_to_idx_for(self, table: str) -> dict:
+        """Return ``{column_name: row_position}`` for the named table."""
+        meta = self.catalog.get_table(table)
+        return {c.name: i for i, c in enumerate(meta.columns)}
+
+
+__all__ = ["Executor"]

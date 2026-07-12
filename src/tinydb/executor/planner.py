@@ -1,8 +1,9 @@
 """AST → Plan tree translation.
 
-T-5.1 implements the planner shape only — actual data flow lives in
-T-5.2..5.6.  The planner is pure: it consults the catalog for schema
-metadata and returns an immutable :class:`Plan` tree.
+T-5.1 implements the planner shape; T-5.2 only adds the
+``Project(..., items=...)`` argument so the executor can evaluate
+non-trivial projections.  Execution itself lives in
+:mod:`tinydb.executor.executor`.
 
 Validation
 ----------
@@ -18,10 +19,10 @@ hook is in place so a future commit only has to fill in the body.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Optional
 
 from tinydb.errors import TinydbError
+from tinydb.executor.executor import Executor  # re-export
 from tinydb.executor.ops import (
     Delete as DeletePlan,
     Filter,
@@ -53,7 +54,7 @@ from tinydb.storage.catalog import Catalog, TableMeta
 
 
 # ---------------------------------------------------------------------------
-# Errors + Executor placeholder
+# Errors
 # ---------------------------------------------------------------------------
 
 
@@ -63,16 +64,6 @@ class UnknownTableError(TinydbError):
 
 class UnknownColumnError(TinydbError):
     """A statement referenced a column that does not exist in the table."""
-
-
-@dataclass
-class Executor:
-    """T-5.1 placeholder.  T-5.2 wires the real row-producing dispatch."""
-
-    catalog: Catalog
-
-    def execute(self, plan: Plan) -> list:
-        raise NotImplementedError("T-5.2 will implement actual execution")
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +105,11 @@ def _plan_select(stmt: Select, catalog: Catalog) -> Plan:
         src = Filter(src=src, predicate=stmt.where)
 
     # Wrap in Project (including SELECT * for uniform executor dispatch).
-    src = Project(src=src, columns=_project_columns(stmt, meta))
+    src = Project(
+        src=src,
+        columns=_project_columns(stmt, meta),
+        items=tuple(stmt.columns),
+    )
 
     # Wrap in Sort for ORDER BY / LIMIT / OFFSET.  Empty keys with a
     # limit is legal — T-5.4 treats empty keys as identity order.

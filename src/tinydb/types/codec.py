@@ -26,7 +26,7 @@ import datetime
 import json
 import struct
 from decimal import Decimal
-from typing import Any
+from typing import Any, Sequence
 
 from tinydb.types.system import TypeTag
 
@@ -224,4 +224,41 @@ def _check_int_range(value: int) -> None:
         raise OverflowError(f"int {value} does not fit in signed 64-bit")
 
 
-__all__ = ["encode_value", "decode_value", "value_size"]
+__all__ = ["encode_value", "decode_value", "value_size",
+           "encode_row", "decode_row"]
+
+
+def encode_row(values: Sequence[Any], tags: Sequence[TypeTag]) -> bytes:
+    """Pack a row as a sequence of length-prefixed values.
+
+    Each value is encoded with ``encode_value(value, tags[i])``. Used by
+    the executor when a Heap stores a tuple of column-major encoded
+    blobs (REQ-QEX-1).
+    """
+    if len(values) != len(tags):
+        raise ValueError(
+            f"encode_row: {len(values)} values vs {len(tags)} tags"
+        )
+    out = bytearray()
+    for v, t in zip(values, tags):
+        out += encode_value(v, t)
+    return bytes(out)
+
+
+def decode_row(blob: bytes, tags: Sequence[TypeTag]) -> tuple:
+    """Reverse of :func:`encode_row` — returns a tuple of Python values.
+
+    Raises if ``blob`` ends mid-value (defensive: Heap should not produce
+    truncated records, but we want a clear error if it does).
+    """
+    out: list = []
+    offset = 0
+    for t in tags:
+        v, offset = decode_value(blob, offset)
+        out.append(v)
+    if offset != len(blob):
+        raise ValueError(
+            f"decode_row: {len(blob) - offset} trailing bytes "
+            f"(expected exactly {len(blob)} consumed)"
+        )
+    return tuple(out)
