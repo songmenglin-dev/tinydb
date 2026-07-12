@@ -237,6 +237,33 @@ class IndexManager:
 
     # -- write hooks (REQ-IDX-4 + REQ-IDX-5) -----------------------------
 
+    def check_unique(self, table: str, row: tuple) -> None:
+        """Raise :class:`ConstraintViolation` if ``row`` would clash with a
+        UNIQUE index on ``table`` — without touching the index or the heap.
+
+        Called by :class:`Insert` / :class:`Update` *before* the heap write
+        so that a rejected row leaves no in-memory residue.  T-6.4 uses
+        this to keep the in-memory heap clean on rollback; T-6.6 will
+        replace the in-memory discard with a real UNDO log on disk.
+
+        Only the new key is checked; existing rows keep their UNIQUE
+        protection from :meth:`on_insert` / :meth:`on_update`.  NULLs
+        are skipped from the uniqueness check (REQ-IDX-5), exactly
+        as in :meth:`on_insert`.
+        """
+        table_meta = self._catalog.get_table(table)
+        for meta, idx in self._indexes_for_table(table):
+            if not meta.unique:
+                continue
+            key = self._extract_key(row, meta.columns, table_meta)
+            if self._key_contains_none(key):
+                continue
+            if idx.search(key):
+                raise ConstraintViolation(
+                    f"UNIQUE constraint violated on {table!r}."
+                    f"{'.'.join(meta.columns)}: duplicate key {key!r}"
+                )
+
     def on_insert(self, table: str, rid: Rid, row: tuple) -> None:
         """Maintain every index on ``table`` after an INSERT.
 

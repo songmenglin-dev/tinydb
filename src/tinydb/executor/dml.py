@@ -76,7 +76,11 @@ class Insert:
         from tinydb.types.codec import encode_row_coerced
 
         meta, tags, n2i, heap = _dml_context(ctx, self.table)
-        affected = 0
+        # Two-phase: validate every row (shape + NOT NULL) before writing
+        # anything to the heap, so that a UNIQUE / NOT NULL violation on
+        # the second row leaves the heap clean (T-6.4 — T-6.6 will add
+        # a real UNDO log on disk).
+        prepared: list[tuple] = []
         for row_values in self.values:
             row_list = list(row_values)
             if len(row_list) != len(meta.columns):
@@ -85,9 +89,20 @@ class Insert:
                     f"{len(meta.columns)} values, got {len(row_list)}"
                 )
             _assert_not_null(row_list, meta.columns, n2i, self.table)
-            rid = heap.insert(encode_row_coerced(row_list, tags))
+            prepared.append(tuple(row_list))
+        # Phase 2 — UNIQUE precheck on the entire batch.  Each row's
+        # check sees both the on-disk state and any earlier row in the
+        # same VALUES list (the manager indexes them in order).  If any
+        # row collides we raise before mutating the heap, so the manager
+        # can roll back without leaving in-memory residue.
+        if ctx.indexer is not None:
+            for row_tuple in prepared:
+                ctx.indexer.check_unique(self.table, row_tuple)
+        affected = 0
+        for row_tuple in prepared:
+            rid = heap.insert(encode_row_coerced(list(row_tuple), tags))
             if ctx.indexer is not None:
-                ctx.indexer.on_insert(self.table, rid, tuple(row_list))
+                ctx.indexer.on_insert(self.table, rid, row_tuple)
             affected += 1
         yield (affected,)
 
@@ -125,13 +140,18 @@ class Update:
                 # type: ignore[arg-type]
                 new_row[n2i[col]] = eval_expr(expr, old_row, n2i)
             _assert_not_null(new_row, meta.columns, n2i, self.table)
+            # Precheck UNIQUE before mutating the heap (T-6.4) — see
+            # Insert.open for the rationale.
+            new_row_tuple = tuple(new_row)
+            if ctx.indexer is not None:
+                ctx.indexer.check_unique(self.table, new_row_tuple)
             heap.delete(rid)
             new_rid = heap.insert(encode_row_coerced(new_row, tags))
             if ctx.indexer is not None:
                 # Rid changes (delete + insert): drop the old index
                 # entry, then add the new one.
                 ctx.indexer.on_delete(self.table, rid, old_row)
-                ctx.indexer.on_insert(self.table, new_rid, tuple(new_row))
+                ctx.indexer.on_insert(self.table, new_rid, new_row_tuple)
             affected += 1
         yield (affected,)
 
