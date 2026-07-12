@@ -44,15 +44,9 @@ class Executor:
         """Materialise the rows of ``plan`` into a list of tuples.
 
         SELECT returns a flat list of row tuples (in projection order).
-        DML raises :class:`NotImplementedError` until T-5.5.  Sort /
-        Limit are now implemented (T-5.4) and run via ``plan.open``.
+        DML (Insert/Update/Delete) returns ``[(affected_count,)]``
+        (T-5.5).  Sort / Limit run via ``plan.open`` (T-5.4).
         """
-        from tinydb.executor.ops import Delete, Insert, Update
-
-        if isinstance(plan, (Insert, Update, Delete)):
-            raise NotImplementedError(
-                f"execute: {type(plan).__name__} is not implemented in T-5.2"
-            )
         return list(plan.open(self))
 
     def heap_for(self, meta: TableMeta) -> Heap:

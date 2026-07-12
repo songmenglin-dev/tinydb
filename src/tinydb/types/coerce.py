@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime
 import json
 from decimal import Decimal
-from typing import Any
+from typing import Any, Sequence
 
 from tinydb.errors import TypeMismatchError
 from tinydb.types.codec import encode_value

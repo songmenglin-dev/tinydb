@@ -18,6 +18,11 @@ from typing import TYPE_CHECKING, Any, Iterator, Optional, Sequence
 if TYPE_CHECKING:
     from tinydb.executor.planner import Executor, UnknownColumnError
 
+# DML plans live in :mod:`tinydb.executor.dml` (T-5.5 split).  They are
+# re-exported below so ``from tinydb.executor.ops import Insert`` still
+# works for the planner and any external callers.
+from tinydb.executor.dml import Delete, Insert, Update  # noqa: E402,F401
+
 
 Row = tuple
 
@@ -271,34 +276,6 @@ def _sort_key(col_idx: dict, keys: Sequence[tuple]):
     return encode
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Insert(Plan):
-    """Insert one row into ``table``."""
-
-    table: str
-    values: tuple
-    op_name: str = "Insert"
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Update(Plan):
-    """Update rows of ``table`` selected by ``predicate`` (``None`` = all)."""
-
-    table: str
-    assignments: Sequence[tuple]  # (column, Expr)
-    predicate: object  # Expr | None
-    op_name: str = "Update"
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Delete(Plan):
-    """Delete rows of ``table`` selected by ``predicate`` (``None`` = all)."""
-
-    table: str
-    predicate: object  # Expr | None
-    op_name: str = "Delete"
-
-
 __all__ = [
     "Plan",
     "Row",
@@ -308,6 +285,7 @@ __all__ = [
     "Project",
     "Sort",
     "Limit",
+    # Re-exported from tinydb.executor.dml for backward compatibility.
     "Insert",
     "Update",
     "Delete",
