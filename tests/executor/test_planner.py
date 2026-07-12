@@ -128,16 +128,15 @@ def test_select_with_where_order_by(users_catalog):
 
 
 def test_select_limit_offset_no_order_by(users_catalog):
-    """SELECT id FROM users LIMIT 5 OFFSET 2 → Sort(Project(SeqScan), limit=5, offset=2)."""
+    """SELECT id FROM users LIMIT 5 OFFSET 2 → Limit(Project(SeqScan))."""
     stmt = parse("SELECT id FROM users LIMIT 5 OFFSET 2")
     p = plan(stmt, users_catalog)
 
-    # outer Sort with empty keys + limit/offset (no ORDER BY clause)
-    assert isinstance(p, Sort)
+    # outer Limit (no ORDER BY → no Sort wrapper)
+    assert isinstance(p, Limit)
     assert p.limit == 5
     assert p.offset == 2
-    assert list(p.keys) == []
-    # inside Sort, Project(['id']) wrapping SeqScan
+    # inside Limit, Project(['id']) wrapping SeqScan
     proj = p.src
     assert isinstance(proj, Project)
     assert list(proj.columns) == ["id"]
@@ -308,6 +307,6 @@ def test_index_scan_dataclass_shape():
     assert scan.hi_inclusive is False
 
 
-def test_limit_alias_is_sort():
-    """Limit is currently a Sort alias per the brief; T-5.4 narrows it."""
-    assert Limit is Sort
+def test_limit_is_not_a_sort_alias():
+    """After T-5.4, Limit is its own dataclass — no longer a Sort alias."""
+    assert Limit is not Sort

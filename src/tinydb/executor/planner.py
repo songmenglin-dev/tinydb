@@ -29,6 +29,7 @@ from tinydb.executor.ops import (
     Filter,
     IndexScan,
     Insert as InsertPlan,
+    Limit,
     Plan,
     Project,
     SeqScan,
@@ -110,13 +111,22 @@ def _plan_select(
         items=tuple(stmt.columns),
     )
 
-    if stmt.order_by or stmt.limit is not None or stmt.offset:
+    # ORDER BY → Sort (sort-only plan, no limit/offset).
+    if stmt.order_by:
         keys = [(ob.column, ob.descending) for ob in stmt.order_by]
         known = set(meta_column_names(meta))
         for col, _ in keys:
             if col not in known:
                 raise UnknownColumnError(col)
-        src = Sort(src=src, keys=keys, limit=stmt.limit, offset=stmt.offset or 0)
+        src = Sort(src=src, keys=keys)
+
+    # LIMIT/OFFSET → dedicated Limit plan, wrapping any Sort.
+    if stmt.limit is not None or stmt.offset:
+        src = Limit(
+            src=src,
+            limit=stmt.limit if stmt.limit is not None else 0,
+            offset=stmt.offset or 0,
+        )
 
     if stmt.group_by:
         known = set(meta_column_names(meta))

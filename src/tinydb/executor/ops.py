@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, Optional, Sequence
 
 if TYPE_CHECKING:
-    from tinydb.executor.planner import Executor
+    from tinydb.executor.planner import Executor, UnknownColumnError
 
 
 Row = tuple
@@ -186,22 +186,89 @@ class Project(Plan):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Sort(Plan):
-    """Sort ``src`` rows by ``keys``; optional ``limit`` + ``offset``.
+    """In-memory sort of ``src`` rows by ``keys``.
 
-    ``keys`` is a sequence of ``(column, descending)`` tuples; empty
-    ``keys`` with a ``limit`` is legal (T-5.4 will narrow this into a
-    dedicated Limit).
+    ``keys`` is a sequence of ``(column, descending)`` tuples.  An empty
+    sequence is identity (no sort).  T-5.4 split the previous
+    ``Limit = Sort`` alias into a dedicated :class:`Limit` plan.
     """
 
     src: Plan
     keys: Sequence[tuple]  # (column, descending: bool)
-    limit: Optional[int] = None
-    offset: int = 0
     op_name: str = "Sort"
 
+    @property
+    def table(self) -> str:  # type: ignore[override]
+        return self.src.table
 
-# alias to satisfy the brief — T-5.4 will narrow Sort into Limit + Sort
-Limit = Sort
+    def open(self, ctx: "Executor") -> Iterator[Row]:
+        from tinydb.executor.planner import UnknownColumnError
+
+        rows = list(self.src.open(ctx))
+        if not self.keys:
+            yield from rows
+            return
+        col_idx = ctx.name_to_idx_for(self.table)
+        for col, _ in self.keys:
+            if col not in col_idx:
+                raise UnknownColumnError(f"{self.table}.{col}")
+        rows.sort(key=_sort_key(col_idx, self.keys))
+        yield from rows
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Limit(Plan):
+    """Slice ``src``: skip ``offset`` rows, then yield at most ``limit``.
+
+    Negative ``limit`` or ``offset`` raises :class:`ValueError`.
+    ``limit`` larger than rowcount returns whatever is left (no
+    padding).  T-5.4 split this from :class:`Sort`.
+    """
+
+    src: Plan
+    limit: int
+    offset: int = 0
+    op_name: str = "Limit"
+
+    @property
+    def table(self) -> str:  # type: ignore[override]
+        return self.src.table
+
+    def open(self, ctx: "Executor") -> Iterator[Row]:
+        if self.limit < 0:
+            raise ValueError("LIMIT must be non-negative")
+        if self.offset < 0:
+            raise ValueError("OFFSET must be non-negative")
+        rows = list(self.src.open(ctx))
+        yield from rows[self.offset : self.offset + self.limit]
+
+
+def _neg(value: Any) -> Any:
+    """Negate a comparable for DESC sort.  None is filtered upstream."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (int, float)):
+        return -value
+    raise TypeError(f"DESC sort: cannot negate {type(value).__name__}")
+
+
+def _sort_key(col_idx: dict, keys: Sequence[tuple]):
+    """Sort-key encoder honouring NULL ordering (SQLite default).
+
+    Each tuple element is ``(is_null, value_or_neg)`` so NULLs sort
+    last in ASC (encoded as ``(1, 0)``) and first in DESC
+    (encoded as ``(0, 0)``).
+    """
+    def encode(row: Row) -> tuple:
+        parts = []
+        for col, desc in keys:
+            v = row[col_idx[col]]
+            if v is None:
+                parts.append((0, 0) if desc else (1, 0))
+            else:
+                parts.append((1, _neg(v)) if desc else (0, v))
+        return tuple(parts)
+    return encode
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

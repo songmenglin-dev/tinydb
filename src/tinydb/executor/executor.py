@@ -44,17 +44,14 @@ class Executor:
         """Materialise the rows of ``plan`` into a list of tuples.
 
         SELECT returns a flat list of row tuples (in projection order).
-        DML raises :class:`NotImplementedError` until T-5.5.
+        DML raises :class:`NotImplementedError` until T-5.5.  Sort /
+        Limit are now implemented (T-5.4) and run via ``plan.open``.
         """
-        from tinydb.executor.ops import Delete, Insert, Sort, Update
+        from tinydb.executor.ops import Delete, Insert, Update
 
         if isinstance(plan, (Insert, Update, Delete)):
             raise NotImplementedError(
                 f"execute: {type(plan).__name__} is not implemented in T-5.2"
-            )
-        if isinstance(plan, Sort):
-            raise NotImplementedError(
-                "execute: Sort is not implemented in T-5.2 (T-5.4)"
             )
         return list(plan.open(self))
 
