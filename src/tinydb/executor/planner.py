@@ -105,11 +105,35 @@ def _plan_select(
         if index_plan is not None:
             src = Filter(src=index_plan, predicate=stmt.where)
 
-    src = Project(
-        src=src,
-        columns=_project_columns(stmt, meta),
-        items=tuple(stmt.columns),
+    # T-5.6: when the SELECT carries aggregates or a GROUP BY, the
+    # Aggregate plan replaces Project.  It produces rows whose layout
+    # is ``(key_tuple..., agg_value_0, agg_value_1, ...)`` so a
+    # subsequent Project would have no useful work to do — the planner
+    # simply skips it (the executor surfaces the post-Aggregate tuple
+    # verbatim).  Plain SELECTs keep their Project as before.
+    #
+    # Note: the parser's ``SELECT`` builder doesn't yet populate
+    # ``Select.aggregates`` (T-3.5 left it ``()``); collect the
+    # Aggregate items by walking ``columns`` here so the planner
+    # works against real SQL.  When the parser catches up this
+    # helper collapses to ``tuple(stmt.aggregates)``.
+    agg_pairs: tuple = tuple(
+        (c.func, c.column) for c in stmt.columns if isinstance(c, Aggregate)
     )
+    if agg_pairs or stmt.group_by:
+        from tinydb.executor.aggregate import Aggregate as AggregatePlan
+
+        src = AggregatePlan(
+            src=src,
+            aggregates=agg_pairs,
+            keys=tuple(stmt.group_by),
+        )
+    else:
+        src = Project(
+            src=src,
+            columns=_project_columns(stmt, meta),
+            items=tuple(stmt.columns),
+        )
 
     # ORDER BY → Sort (sort-only plan, no limit/offset).
     if stmt.order_by:

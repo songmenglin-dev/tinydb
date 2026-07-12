@@ -23,6 +23,12 @@ if TYPE_CHECKING:
 # works for the planner and any external callers.
 from tinydb.executor.dml import Delete, Insert, Update  # noqa: E402,F401
 
+# T-5.6: aggregate plan lives in its own module (kept out of ops to
+# keep this module under its line cap and let the aggregate helpers
+# stay self-contained).  It imports :class:`Plan` from this module,
+# so a top-level import would be circular — register a lazy
+# __getattr__ that resolves ``Aggregate`` on first access.
+
 
 Row = tuple
 
@@ -207,13 +213,27 @@ class Sort(Plan):
         return self.src.table
 
     def open(self, ctx: "Executor") -> Iterator[Row]:
+        from tinydb.executor.aggregate import Aggregate as AggregatePlan
         from tinydb.executor.planner import UnknownColumnError
 
         rows = list(self.src.open(ctx))
         if not self.keys:
             yield from rows
             return
-        col_idx = ctx.name_to_idx_for(self.table)
+        # T-5.6: when Sort wraps an Aggregate plan, the post-aggregate
+        # row layout is ``(key_0, key_1, ..., agg_0, agg_1, ...)``.
+        # Build a synthetic column→index map for the group keys so
+        # ORDER BY <group_col> works.  Aggregate columns are
+        # referenced in the SQL by name (``COUNT(*)``); ORDER BY
+        # against an aggregate is rare in v0.1 and resolves to the
+        # synthesized name below.
+        if isinstance(self.src, AggregatePlan):
+            col_idx = {col: i for i, col in enumerate(self.src.keys)}
+            synth_offset = len(self.src.keys)
+            for i, (func, column) in enumerate(self.src.aggregates):
+                col_idx[f"{func}({column})"] = synth_offset + i
+        else:
+            col_idx = ctx.name_to_idx_for(self.table)
         for col, _ in self.keys:
             if col not in col_idx:
                 raise UnknownColumnError(f"{self.table}.{col}")
@@ -276,6 +296,26 @@ def _sort_key(col_idx: dict, keys: Sequence[tuple]):
     return encode
 
 
+# Lazy re-export for Aggregate — its module imports Plan from here,
+# so a top-level import is circular.  ``__getattr__`` resolves it
+# the first time something does ``from tinydb.executor.ops import
+# Aggregate`` (or accesses ``ops.Aggregate`` after ``import ops``).
+_AGGREGATE = "Aggregate"
+_LAZY: dict = {_AGGREGATE: ("tinydb.executor.aggregate", "Aggregate")}
+
+
+def __getattr__(name: str):
+    target = _LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    mod_name, attr = target
+    import importlib
+    mod = importlib.import_module(mod_name)
+    value = getattr(mod, attr)
+    globals()[name] = value  # cache for subsequent access
+    return value
+
+
 __all__ = [
     "Plan",
     "Row",
@@ -285,6 +325,7 @@ __all__ = [
     "Project",
     "Sort",
     "Limit",
+    "Aggregate",
     # Re-exported from tinydb.executor.dml for backward compatibility.
     "Insert",
     "Update",

@@ -8,6 +8,7 @@ from tinydb.executor.heap_bind import bind_heap
 from tinydb.executor.index_plan import IndexablePredicate, extract_indexable
 from tinydb.executor.index_scan import IndexLookup
 from tinydb.executor.ops import (
+    Aggregate,
     Delete,
     Filter,
     IndexScan,
@@ -32,6 +33,7 @@ __all__ = [
     "Project",
     "Sort",
     "Limit",
+    "Aggregate",
     "Insert",
     "Update",
     "Delete",
