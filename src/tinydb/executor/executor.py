@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from tinydb.executor.ops import Plan
+from tinydb.index.btree import BTreeIndex
+from tinydb.index.manager import IndexManager
 from tinydb.storage.catalog import Catalog, TableMeta
 from tinydb.storage.heap import Heap
 from tinydb.storage.pager import Pager
@@ -26,10 +28,16 @@ class Executor:
     ``SeqScan`` accesses don't re-bind a fresh heap.  Reads share a
     single :class:`Pager` (passed at construction) so the catalog
     and the heap pages see consistent bytes.
+
+    ``indexer`` is optional: when present the executor can resolve
+    :class:`~tinydb.executor.ops.IndexScan` plans against the live
+    B-tree indexes; when ``None`` the planner's index-selection path
+    will skip and the executor falls back to SeqScan.
     """
 
     catalog: Catalog
     pager: Optional[Pager] = None
+    indexer: Optional[IndexManager] = None
     _heaps: dict = field(default_factory=dict)
 
     def execute(self, plan: Plan) -> list:
@@ -76,6 +84,17 @@ class Executor:
         """Return ``{column_name: row_position}`` for the named table."""
         meta = self.catalog.get_table(table)
         return {c.name: i for i, c in enumerate(meta.columns)}
+
+    def indexer_for(self, table: str, index_name: str) -> Optional[BTreeIndex]:
+        """Return the live :class:`BTreeIndex` for ``index_name``.
+
+        ``None`` when no :class:`IndexManager` is bound or the index
+        is not registered.  IndexScan.open uses this to resolve the
+        B-tree without reaching into the manager directly.
+        """
+        if self.indexer is None:
+            return None
+        return self.indexer.get_by_name(index_name)
 
 
 __all__ = ["Executor"]

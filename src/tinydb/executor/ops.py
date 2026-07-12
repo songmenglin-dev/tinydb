@@ -1,12 +1,10 @@
 """Plan tree dataclasses — AST → execution-plan translation layer.
 
 Each :class:`Plan` subclass is a frozen, slotted dataclass carrying the
-opaque fields a downstream executor will need to materialize rows.
-T-5.1 only fixes the *shape* of the tree; T-5.2..5.6 implement the
-iterators (``open``) that turn plans into :class:`Row` streams.
+opaque fields a downstream executor needs to materialize rows.
+T-5.1 fixes the tree shape; T-5.2..5.6 implement ``open`` to turn
+plans into :class:`Row` streams.
 
-Immutability
-------------
 Every Plan is ``@dataclass(frozen=True, slots=True)`` so two identical
 plan trees are interchangeable and the executor can cache / hash them
 freely.
@@ -21,7 +19,6 @@ if TYPE_CHECKING:
     from tinydb.executor.planner import Executor
 
 
-# A row is a tuple of bytes-encoded column values in declared column order.
 Row = tuple
 
 
@@ -29,19 +26,16 @@ Row = tuple
 class Plan:
     """Marker base — concrete plans are subclasses below.
 
-    ``op_name`` is a class-level discriminator: subclasses set their own
-    ``op_name`` as a default.  This avoids the dataclass-with-inheritance
-    ``super().__init__`` pitfall (a frozen+slotted subclass cannot call
-    ``super().__init__`` after ``__init__`` is generated for the child).
+    ``op_name`` is a class-level discriminator so debug logs can switch
+    on a single string field.
     """
 
     op_name: str = "Plan"
 
     def open(self, ctx: "Executor") -> Iterator[Row]:  # noqa: F821
-        """Produce the row stream for this plan.  T-5.2 fills this in."""
         raise NotImplementedError("T-5.2 will implement actual execution")
 
-    def __iter__(self) -> Iterator[Row]:  # pragma: no cover - convenience
+    def __iter__(self) -> Iterator[Row]:  # pragma: no cover
         return self.open(None)  # type: ignore[arg-type]
 
     @property
@@ -56,20 +50,9 @@ class Plan:
         )
 
 
-# ``op_name`` defaults below are set via ``field(default=...)`` because
-# dataclass() reads class annotations and a plain class attribute would
-# become a regular instance attribute.  Each subclass sets its own
-# discriminator so debug logs can switch on a single string field.
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SeqScan(Plan):
-    """Scan every row of ``table`` in heap order.
-
-    The placeholder executor raises ``NotImplementedError``; T-5.2 will
-    bind a :class:`~tinydb.storage.heap.Heap` from ``catalog`` and yield
-    each row tuple in declared column order.
-    """
+    """Scan every row of ``table`` in heap order."""
 
     table: str
     op_name: str = "SeqScan"
@@ -92,9 +75,7 @@ class IndexScan(Plan):
     """Range scan over a single-column index.
 
     ``lo`` / ``hi`` are ``None`` for open-ended bounds; ``lo_inclusive``
-    and ``hi_inclusive`` mirror SQL's ``[)`` semantics for ordered
-    ranges.  T-5.3 will populate this branch from
-    :func:`tinydb.executor.planner._try_index_plan`.
+    / ``hi_inclusive`` mirror SQL's ``[)`` semantics for ordered ranges.
     """
 
     table: str
@@ -104,6 +85,43 @@ class IndexScan(Plan):
     lo_inclusive: bool = True
     hi_inclusive: bool = True
     op_name: str = "IndexScan"
+
+    @property
+    def table(self) -> str:  # type: ignore[override]
+        return self.__dict__["table"]
+
+    def open(self, ctx: "Executor") -> Iterator[Row]:
+        """Yield decoded row tuples for each rid in the index range."""
+        from tinydb.executor.index_scan import IndexLookup
+        from tinydb.types.codec import decode_row
+
+        idx_obj = ctx.indexer_for(self.table, self.index) if ctx.indexer else None
+        if idx_obj is None:
+            return  # defensive; planner should never pick IndexScan w/o indexer
+        meta = ctx.catalog.get_table(self.table)
+        tags = tuple(c.tag for c in meta.columns)
+        heap = ctx.heap_for(meta)
+        lookup = IndexLookup(ctx.indexer, idx_obj, tags[0])
+        is_equality = (
+            self.lo is not None
+            and self.hi is not None
+            and self.lo == self.hi
+            and self.lo_inclusive
+            and self.hi_inclusive
+        )
+        if is_equality:
+            rids = lookup.equality(self.lo)
+        else:
+            rids = lookup.range(
+                self.lo, self.hi,
+                lo_inclusive=self.lo_inclusive,
+                hi_inclusive=self.hi_inclusive,
+            )
+        for rid, _key in rids:
+            blob = heap.read(rid)
+            if blob is None:
+                continue
+            yield decode_row(blob, tags)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -134,13 +152,9 @@ class Project(Plan):
 
     For ``SELECT *`` the planner produces a Project listing every
     column of the table in declared order (so the executor sees a
-    uniform shape regardless of the SQL form).
-
-    ``items`` is the parallel AST list (column name → source Expr) so
-    the executor can evaluate non-trivial projections (``SELECT 1+2``,
-    ``SELECT name FROM ...``).  For T-5.2 every ``item`` is either a
-    :class:`ColumnRef` / :class:`Literal` / :class:`TypedLiteral` /
-    :class:`BinaryOp` / :class:`UnaryOp`; aggregates (T-5.6) raise.
+    uniform shape regardless of the SQL form).  ``items`` is the
+    parallel AST list so non-trivial projections (``SELECT 1+2``)
+    can be evaluated; aggregates (T-5.6) raise.
     """
 
     src: Plan
@@ -174,10 +188,9 @@ class Project(Plan):
 class Sort(Plan):
     """Sort ``src`` rows by ``keys``; optional ``limit`` + ``offset``.
 
-    ``keys`` is a sequence of ``(column, descending)`` tuples — the
-    planner emits ``(col, False)`` for ASC and ``(col, True)`` for
-    DESC.  An empty ``keys`` sequence with a ``limit`` is legal (the
-    executor treats it as "take the first N rows in input order").
+    ``keys`` is a sequence of ``(column, descending)`` tuples; empty
+    ``keys`` with a ``limit`` is legal (T-5.4 will narrow this into a
+    dedicated Limit).
     """
 
     src: Plan
@@ -193,11 +206,7 @@ Limit = Sort
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Insert(Plan):
-    """Insert one row into ``table``.
-
-    ``values`` is a single-row tuple (matching the AST's outer-tuple
-    shape so the planner can forward ``Insert.values[0]`` unchanged).
-    """
+    """Insert one row into ``table``."""
 
     table: str
     values: tuple
@@ -206,10 +215,7 @@ class Insert(Plan):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Update(Plan):
-    """Update rows of ``table`` selected by ``predicate``.
-
-    ``predicate`` is ``None`` to mean "update every row".
-    """
+    """Update rows of ``table`` selected by ``predicate`` (``None`` = all)."""
 
     table: str
     assignments: Sequence[tuple]  # (column, Expr)
@@ -219,10 +225,7 @@ class Update(Plan):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Delete(Plan):
-    """Delete rows of ``table`` selected by ``predicate``.
-
-    ``predicate`` is ``None`` to mean "delete every row".
-    """
+    """Delete rows of ``table`` selected by ``predicate`` (``None`` = all)."""
 
     table: str
     predicate: object  # Expr | None

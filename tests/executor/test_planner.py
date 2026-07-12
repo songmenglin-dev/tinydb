@@ -238,7 +238,7 @@ def test_try_index_plan_called_but_returns_none(users_catalog, monkeypatch):
 
     calls = []
 
-    def spy(predicate, table_meta):
+    def spy(predicate, table_meta, indexer=None):
         calls.append((predicate, table_meta.name))
         return None
 

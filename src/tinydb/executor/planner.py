@@ -1,9 +1,8 @@
 """AST → Plan tree translation.
 
-T-5.1 implements the planner shape; T-5.2 only adds the
+T-5.1 implements the planner shape; T-5.2 adds the
 ``Project(..., items=...)`` argument so the executor can evaluate
-non-trivial projections.  Execution itself lives in
-:mod:`tinydb.executor.executor`.
+non-trivial projections; T-5.3 adds the index selection hook.
 
 Validation
 ----------
@@ -12,9 +11,10 @@ Validation
 
 Index selection
 ---------------
-``_try_index_plan`` is a stub for T-5.3; today it always returns
-``None`` so the planner falls through to ``SeqScan + Filter``.  The
-hook is in place so a future commit only has to fill in the body.
+``_try_index_plan`` extracts a single-column :class:`IndexablePredicate`
+from the WHERE clause; when an index covers that column it returns an
+:class:`IndexScan`, otherwise ``None`` so the caller falls back to
+``SeqScan + Filter``.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from typing import Any, Optional
 
 from tinydb.errors import TinydbError
 from tinydb.executor.executor import Executor  # re-export
+from tinydb.executor.index_plan import extract_indexable
 from tinydb.executor.ops import (
     Delete as DeletePlan,
     Filter,
@@ -34,6 +35,7 @@ from tinydb.executor.ops import (
     Sort,
     Update as UpdatePlan,
 )
+from tinydb.index.manager import IndexManager
 from tinydb.sql.ast import (
     Aggregate,
     BinaryOp,
@@ -47,15 +49,9 @@ from tinydb.sql.ast import (
     Star,
     Statement,
     TypedLiteral,
-    UnaryOp,
     Update as UpdateStmt,
 )
-from tinydb.storage.catalog import Catalog, TableMeta
-
-
-# ---------------------------------------------------------------------------
-# Errors
-# ---------------------------------------------------------------------------
+from tinydb.storage.catalog import Catalog, IndexMeta, TableMeta
 
 
 class UnknownTableError(TinydbError):
@@ -66,15 +62,20 @@ class UnknownColumnError(TinydbError):
     """A statement referenced a column that does not exist in the table."""
 
 
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
+def plan(
+    stmt: Statement,
+    catalog: Catalog,
+    indexer: Optional[IndexManager] = None,
+) -> Plan:
+    """Lower ``stmt`` (an AST node) into a :class:`Plan` tree.
 
-
-def plan(stmt: Statement, catalog: Catalog) -> Plan:
-    """Lower ``stmt`` (an AST node) into a :class:`Plan` tree."""
+    ``indexer`` is optional; when provided the planner picks
+    :class:`IndexScan` over :class:`SeqScan` whenever a single-column
+    equality or range predicate matches an existing B-tree index.
+    Without ``indexer`` the planner always falls back to SeqScan+Filter.
+    """
     if isinstance(stmt, Select):
-        return _plan_select(stmt, catalog)
+        return _plan_select(stmt, catalog, indexer)
     if isinstance(stmt, InsertStmt):
         return _plan_insert(stmt, catalog)
     if isinstance(stmt, UpdateStmt):
@@ -86,33 +87,29 @@ def plan(stmt: Statement, catalog: Catalog) -> Plan:
     )
 
 
-# ---------------------------------------------------------------------------
-# Select
-# ---------------------------------------------------------------------------
-
-
-def _plan_select(stmt: Select, catalog: Catalog) -> Plan:
+def _plan_select(
+    stmt: Select,
+    catalog: Catalog,
+    indexer: Optional[IndexManager] = None,
+) -> Plan:
     meta = _require_table(stmt.table, catalog)
+    if stmt.where is not None:
+        _validate_expr_columns(stmt.where, meta)
 
     # Source: SeqScan by default; IndexScan when _try_index_plan succeeds.
     src: Plan = SeqScan(table=meta.name)
-    if (index_plan := _try_index_plan(stmt.where, meta)) is not None:
-        src = index_plan
-
-    # Wrap in Filter when a WHERE clause is present.
     if stmt.where is not None:
-        _validate_expr_columns(stmt.where, meta)
+        index_plan = _try_index_plan(stmt.where, meta, indexer)
         src = Filter(src=src, predicate=stmt.where)
+        if index_plan is not None:
+            src = Filter(src=index_plan, predicate=stmt.where)
 
-    # Wrap in Project (including SELECT * for uniform executor dispatch).
     src = Project(
         src=src,
         columns=_project_columns(stmt, meta),
         items=tuple(stmt.columns),
     )
 
-    # Wrap in Sort for ORDER BY / LIMIT / OFFSET.  Empty keys with a
-    # limit is legal — T-5.4 treats empty keys as identity order.
     if stmt.order_by or stmt.limit is not None or stmt.offset:
         keys = [(ob.column, ob.descending) for ob in stmt.order_by]
         known = set(meta_column_names(meta))
@@ -121,8 +118,6 @@ def _plan_select(stmt: Select, catalog: Catalog) -> Plan:
                 raise UnknownColumnError(col)
         src = Sort(src=src, keys=keys, limit=stmt.limit, offset=stmt.offset or 0)
 
-    # GROUP BY / aggregate — T-5.1 only constructs the plan shape;
-    # T-5.6 will dispatch on the presence of aggregates at execute time.
     if stmt.group_by:
         known = set(meta_column_names(meta))
         for col in stmt.group_by:
@@ -160,19 +155,12 @@ def _project_columns(stmt: Select, meta: TableMeta) -> list:
         elif isinstance(item, TypedLiteral):
             out.append(f"L[{item.tag.name}]:{item.value!r}")
         else:
-            # BinaryOp / UnaryOp / unknown: stable synthetic name.
             out.append(type(item).__name__)
     return out
 
 
-# ---------------------------------------------------------------------------
-# DML statements
-# ---------------------------------------------------------------------------
-
-
 def _plan_insert(stmt: InsertStmt, catalog: Catalog) -> Plan:
     _require_table(stmt.table, catalog)
-    # Forward the multi-row ``values`` tuple; executor iterates it.
     return InsertPlan(table=stmt.table, values=stmt.values)
 
 
@@ -198,11 +186,6 @@ def _plan_delete(stmt: DeleteStmt, catalog: Catalog) -> Plan:
     return DeletePlan(table=stmt.table, predicate=stmt.where)
 
 
-# ---------------------------------------------------------------------------
-# Catalog helpers
-# ---------------------------------------------------------------------------
-
-
 def _require_table(name: str, catalog: Catalog) -> TableMeta:
     try:
         return catalog.get_table(name)
@@ -226,20 +209,56 @@ def _walk_expr(expr: Any, known: set) -> None:
     elif isinstance(expr, BinaryOp):
         _walk_expr(expr.left, known)
         _walk_expr(expr.right, known)
-    elif isinstance(expr, UnaryOp):
-        _walk_expr(expr.operand, known)
     # Literal / TypedLiteral / Star / Aggregate — nothing to validate.
 
 
-# ---------------------------------------------------------------------------
-# Index-plan stub (T-5.3 fills in)
-# ---------------------------------------------------------------------------
-
-
 def _try_index_plan(
-    predicate: Optional[Expr], meta: TableMeta
+    predicate: Optional[Expr],
+    meta: TableMeta,
+    indexer: Optional[IndexManager] = None,
 ) -> Optional[IndexScan]:
-    """Stub for T-5.3 index selection.  Always returns ``None`` today."""
+    """Pick an :class:`IndexScan` if a single-column predicate matches.
+
+    Walks the WHERE clause via :func:`extract_indexable`.  When the
+    resulting :class:`IndexablePredicate` names a column covered by a
+    live index, returns the corresponding :class:`IndexScan`; otherwise
+    ``None`` so the caller falls back to ``SeqScan + Filter``.
+    """
+    cols = tuple(c.name for c in meta.columns)
+    pred = extract_indexable(predicate, cols)
+    if pred is None or indexer is None:
+        return None
+    idx_meta = _find_index_for_column(meta, pred.column, indexer)
+    if idx_meta is None:
+        return None
+    if pred.hi_op is None:
+        if pred.op == "=":
+            return IndexScan(
+                table=meta.name, index=idx_meta.name,
+                lo=pred.value, hi=pred.value,
+                lo_inclusive=True, hi_inclusive=True,
+            )
+        return IndexScan(
+            table=meta.name, index=idx_meta.name,
+            lo=pred.value, hi=None,
+            lo_inclusive=pred.op in ("=", ">=", "<="),
+            hi_inclusive=True,
+        )
+    return IndexScan(
+        table=meta.name, index=idx_meta.name,
+        lo=pred.value, hi=pred.hi_value,
+        lo_inclusive=pred.op in ("=", ">=", "<="),
+        hi_inclusive=pred.hi_op in ("=", "<=", ">="),
+    )
+
+
+def _find_index_for_column(
+    meta: TableMeta, column: str, indexer: IndexManager
+) -> Optional[IndexMeta]:
+    """Return the first single-column index covering ``column``."""
+    for idx_meta in indexer._meta_by_name.values():
+        if idx_meta.table == meta.name and idx_meta.columns == (column,):
+            return idx_meta
     return None
 
 
