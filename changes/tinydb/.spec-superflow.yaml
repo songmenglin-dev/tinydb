@@ -11,7 +11,7 @@ contract_hash: sha256:c96afb29d9ca7805419d037fb209dcd340a02eda24d4f86be7b99c155d
 
 # === Execution progress ===
 execution_mode: batch_inline
-batches_completed: 6
+batches_completed: 9
 test_result: null
 spec_merged: false
 

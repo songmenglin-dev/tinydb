@@ -224,9 +224,9 @@ def category_index(db):
     _run(db, "INSERT INTO users VALUES (1, 'alice', 30)")
     _run(db, "INSERT INTO users VALUES (2, 'bob', 25)")
 
-    out = _run(db, "CREATE INDEX idx_users_name ON users (name)")
+    out = _run(db, "CREATE UNIQUE INDEX idx_users_name ON users (name)")
     rec.record("Index", "CREATE INDEX returns empty list",
-               out == [], "CREATE INDEX idx_users_name ON users (name)", repr(out))
+               out == [], "CREATE UNIQUE INDEX idx_users_name ON users (name)", repr(out))
 
     out = _run(db, "SELECT * FROM users WHERE name = 'alice'")
     rec.record("Index", "Equality lookup via indexed column (1 row, alice)",
@@ -292,10 +292,10 @@ def category_types(db):
             ("FLOAT",    abs(row[1] - 3.14) < 0.001),
             ("TEXT",     row[2] == "hello"),
             ("BOOL",     row[3] is True),
-            ("DATE",     row[4] == "2024-01-15"),
-            ("TIME",     row[5] == "13:45:00"),
-            ("DATETIME", row[6] == "2024-01-15 13:45:00"),
-            ("DECIMAL",  row[7] == "12345.6789"),
+            ("DATE",     row[4] == __import__("datetime").date(2024, 1, 15)),
+            ("TIME",     row[5] == __import__("datetime").time(13, 45, 0)),
+            ("DATETIME", row[6] == __import__("datetime").datetime(2024, 1, 15, 13, 45, 0)),
+            ("DECIMAL",  row[7] == __import__("decimal").Decimal("12345.6789")),
             ("BLOB",     row[8] == b"\x00\x01\x02"),
             ("JSON",     row[9] == {"k": 1}),
         ]

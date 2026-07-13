@@ -101,7 +101,7 @@ class TransactionManager:
         # Page ids touched in the current tx (used by rollback to
         # restore the before-images in-memory so ROLLBACK leaves the
         # heap clean even before Recovery runs).
-        self._logged_pages: list = []
+        self._logged_pages: list = []  # list[tuple[int, bytes]] = (page_id, before_image)
 
     @property
     def active_tx(self) -> Optional[TransactionContext]:
@@ -161,12 +161,12 @@ class TransactionManager:
         tx_id = self._active_tx.tx_id if self._active_tx is not None else 0
         payload = encode_page_record(tx_id, page_id, before, after)
         self._wal.append(RT_PAGE, payload)
-        self._logged_pages.append(page_id)
+        self._logged_pages.append((page_id, before))
 
     @property
     def logged_pages(self) -> list:
         """Page ids touched in the current tx (testing/observability)."""
-        return list(self._logged_pages)
+        return [pid for pid, _ in self._logged_pages]
 
     def _release_lock(self) -> None:
         """Drop the held token; safe iff a tx is active."""
@@ -205,6 +205,12 @@ class TransactionManager:
             raise ValueError("rollback(): not the active transaction")
         self._wal.append(RT_ROLLBACK, _encode_tx_id(tx.tx_id))
         self._wal.fsync()
+        # Restore before-images to the pager so in-memory state matches
+        # the ROLLBACK record.  Walking in REVERSE order so a page
+        # written multiple times in the tx is restored to its
+        # earliest-pre-tx content.
+        for page_id, before in reversed(self._logged_pages):
+            self._pager.write_page(page_id, before)
         self._logged_pages = []
         self._active_tx = None
         self._release_lock()

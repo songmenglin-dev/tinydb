@@ -188,7 +188,33 @@ class IndexManager:
         )
         self._meta_by_name[name] = meta
         self._index_by_name[name] = self._open_index(meta)
+        # Backfill: scan existing rows and populate the B-tree.
+        # Rows inserted AFTER create_index are populated via
+        # on_insert hooks; rows inserted BEFORE create_index are
+        # picked up here.
+        self._backfill_index(table_meta, cols, self._index_by_name[name])
         return meta
+
+    def _backfill_index(self, table_meta, columns, idx) -> None:
+        from tinydb.types.codec import decode_row
+        from tinydb.storage.heap import Heap
+        heap = Heap(self._pager)
+        heap._head_pid = table_meta.heap_pid
+        tags = tuple(c.tag for c in table_meta.columns)
+        col_names = {c.name: i for i, c in enumerate(table_meta.columns)}
+        col_idx = tuple(col_names[c] for c in columns)
+        # Single-column: scalar key under the column's own tag.
+        # Multi-column: tuple key encoded via Json (matches _extract_key).
+        for rid in heap.scan():
+            blob = heap.read(rid)
+            if blob is None:
+                continue
+            row = decode_row(blob, tags)
+            values = [row[i] for i in col_idx]
+            if any(v is None for v in values):
+                continue
+            key = values[0] if len(values) == 1 else tuple(values)
+            idx.insert(key, rid)
 
     def drop_index(self, name: str) -> None:
         """Drop the index ``name`` and free its B-tree pages.

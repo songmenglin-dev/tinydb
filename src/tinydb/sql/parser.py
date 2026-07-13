@@ -193,7 +193,9 @@ class _Parser:
         nxt = self._peek()
         if nxt.kind is TokenKind.KEYWORD and nxt.value == "TABLE":
             return self._parse_create_table()
-        if nxt.kind is TokenKind.KEYWORD and nxt.value == "INDEX":
+        # Both ``CREATE INDEX`` and ``CREATE UNIQUE INDEX`` route here;
+        # the inner parser consumes INDEX (and optional UNIQUE).
+        if nxt.kind is TokenKind.KEYWORD and nxt.value in ("INDEX", "UNIQUE"):
             return self._parse_create_index()
         raise ParseError(
             nxt.line, nxt.col,
@@ -201,13 +203,16 @@ class _Parser:
         )
 
     def _parse_create_index(self) -> Statement:
-        """``CREATE [UNIQUE] INDEX <name> ON <table> (<col>)"""
-        self._expect_keyword("INDEX")
+        """``CREATE [UNIQUE] INDEX <name> ON <table> (<col>)``"""
+        # The dispatch only peeked; here we consume the actual keyword
+        # sequence.  For ``CREATE INDEX`` we see INDEX next; for
+        # ``CREATE UNIQUE INDEX`` we see UNIQUE first.
         unique = False
         nxt = self._peek()
         if nxt.kind is TokenKind.KEYWORD and nxt.value == "UNIQUE":
             self._advance()
             unique = True
+        self._expect_keyword("INDEX")
         name_tok = self._expect_ident()
         self._expect_keyword("ON")
         table_tok = self._expect_ident()

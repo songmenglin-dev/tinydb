@@ -20,6 +20,7 @@ from typing import Callable, List
 from tinydb.api import Database
 from tinydb.cli.format import format_rows
 from tinydb.errors import ParseError, TinydbError
+import sys
 from tinydb.executor.ops import result_columns
 from tinydb.executor.planner import plan as _plan
 from tinydb.sql.ast import CreateTable, DropTable
@@ -163,6 +164,12 @@ def run_repl(
     output("tinydb v0.1 REPL — enter SQL, or '.help' for commands")
     while True:
         try:
+            # Flush stdout so the prompt appears immediately when the
+            # REPL is driven via piped stdin (e.g. ``python -m tinydb``
+            # in a subprocess). Without this, output buffering makes
+            # the prompt appear *after* the result rather than before
+            # the next input.
+            sys.stdout.flush()
             line = input_fn("tinydb> ")
         except EOFError:
             return 0

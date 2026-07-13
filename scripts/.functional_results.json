@@ -1,0 +1,330 @@
+[
+  {
+    "category": "DDL",
+    "name": "CREATE TABLE returns empty list",
+    "passed": true,
+    "command": "CREATE TABLE demo (x INT, y TEXT)",
+    "stdout": "[]",
+    "error": ""
+  },
+  {
+    "category": "DDL",
+    "name": "Table is reachable after CREATE",
+    "passed": true,
+    "command": "SELECT x FROM demo",
+    "stdout": "[]",
+    "error": ""
+  },
+  {
+    "category": "DDL",
+    "name": "DROP TABLE returns empty list",
+    "passed": true,
+    "command": "DROP TABLE demo",
+    "stdout": "[]",
+    "error": ""
+  },
+  {
+    "category": "DML",
+    "name": "INSERT (1, 'alice', 30)",
+    "passed": true,
+    "command": "INSERT INTO users VALUES (1, 'alice', 30)",
+    "stdout": "[(1,)]",
+    "error": ""
+  },
+  {
+    "category": "DML",
+    "name": "SELECT * returns 4 rows",
+    "passed": true,
+    "command": "SELECT * FROM users",
+    "stdout": "[(1, 'alice', 30), (2, 'bob', 25), (3, 'carol', 35), (4, 'dave', 18)]",
+    "error": ""
+  },
+  {
+    "category": "DML",
+    "name": "SELECT WHERE age > 25 (alice+carol=2)",
+    "passed": true,
+    "command": "SELECT * FROM users WHERE age > 25",
+    "stdout": "[(1, 'alice', 30), (3, 'carol', 35)]",
+    "error": ""
+  },
+  {
+    "category": "DML",
+    "name": "UPDATE returns affected count (1)",
+    "passed": true,
+    "command": "UPDATE users SET age = 31 WHERE id = 1",
+    "stdout": "[(1,)]",
+    "error": ""
+  },
+  {
+    "category": "DML",
+    "name": "UPDATE reflected (age=31)",
+    "passed": true,
+    "command": "SELECT * FROM users WHERE id = 1",
+    "stdout": "[(1, 'alice', 31)]",
+    "error": ""
+  },
+  {
+    "category": "DML",
+    "name": "DELETE returns affected count (1)",
+    "passed": true,
+    "command": "DELETE FROM users WHERE id = 4",
+    "stdout": "[(1,)]",
+    "error": ""
+  },
+  {
+    "category": "DML",
+    "name": "DELETE persisted (3 rows)",
+    "passed": true,
+    "command": "SELECT * FROM users",
+    "stdout": "[(2, 'bob', 25), (3, 'carol', 35), (1, 'alice', 31)]",
+    "error": ""
+  },
+  {
+    "category": "Filter",
+    "name": "AND + inequality (1 row)",
+    "passed": true,
+    "command": "SELECT ... WHERE age > 25 AND name != 'carol'",
+    "stdout": "[(1, 'alice', 30)]",
+    "error": ""
+  },
+  {
+    "category": "Filter",
+    "name": "OR over names (2 rows)",
+    "passed": true,
+    "command": "SELECT ... WHERE name='bob' OR name='carol'",
+    "stdout": "[(2, 'bob', 25), (3, 'carol', 35)]",
+    "error": ""
+  },
+  {
+    "category": "Filter",
+    "name": "IS NULL matches eve",
+    "passed": true,
+    "command": "SELECT ... WHERE age IS NULL",
+    "stdout": "[(4, 'eve', None)]",
+    "error": ""
+  },
+  {
+    "category": "Filter",
+    "name": "IS NOT NULL excludes NULLs (3 rows)",
+    "passed": true,
+    "command": "SELECT ... WHERE age IS NOT NULL",
+    "stdout": "[(1, 'alice', 30), (2, 'bob', 25), (3, 'carol', 35)]",
+    "error": ""
+  },
+  {
+    "category": "Ordering",
+    "name": "ORDER BY ASC LIMIT 2 (alice+bob)",
+    "passed": true,
+    "command": "SELECT name FROM users ORDER BY age ASC LIMIT 2",
+    "stdout": "[('alice',), ('bob',)]",
+    "error": ""
+  },
+  {
+    "category": "Ordering",
+    "name": "ORDER BY DESC LIMIT 2 (dave+carol)",
+    "passed": true,
+    "command": "SELECT name FROM users ORDER BY age DESC LIMIT 2",
+    "stdout": "[('dave',), ('carol',)]",
+    "error": ""
+  },
+  {
+    "category": "Ordering",
+    "name": "OFFSET 2 LIMIT 1 (carol)",
+    "passed": true,
+    "command": "SELECT ... ORDER BY age ASC LIMIT 1 OFFSET 2",
+    "stdout": "[('carol',)]",
+    "error": ""
+  },
+  {
+    "category": "Aggregate",
+    "name": "COUNT(*) = 4",
+    "passed": true,
+    "command": "SELECT COUNT(*) FROM users",
+    "stdout": "[(4,)]",
+    "error": ""
+  },
+  {
+    "category": "Aggregate",
+    "name": "MIN/MAX/SUM/AVG",
+    "passed": true,
+    "command": "SELECT MIN(age), MAX(age), SUM(age), AVG(age) FROM users",
+    "stdout": "[(18, 35, 108, 27.0)]",
+    "error": ""
+  },
+  {
+    "category": "Aggregate",
+    "name": "GROUP BY name returns 4 rows",
+    "passed": true,
+    "command": "SELECT COUNT(*) FROM users GROUP BY name",
+    "stdout": "[('alice', 1), ('bob', 1), ('carol', 1), ('dave', 1)]",
+    "error": ""
+  },
+  {
+    "category": "Index",
+    "name": "CREATE INDEX returns empty list",
+    "passed": true,
+    "command": "CREATE UNIQUE INDEX idx_users_name ON users (name)",
+    "stdout": "[]",
+    "error": ""
+  },
+  {
+    "category": "Index",
+    "name": "Equality lookup via indexed column (1 row, alice)",
+    "passed": true,
+    "command": "SELECT * FROM users WHERE name = 'alice'",
+    "stdout": "[(1, 'alice', 30)]",
+    "error": ""
+  },
+  {
+    "category": "Index",
+    "name": "UNIQUE duplicate name rejected",
+    "passed": true,
+    "command": "INSERT INTO users VALUES (99, 'alice', 99)",
+    "stdout": "",
+    "error": "UNIQUE constraint violated on 'users'.name: duplicate key 'alice'"
+  },
+  {
+    "category": "Index",
+    "name": "NOT NULL violation rejected",
+    "passed": true,
+    "command": "INSERT INTO users (id, age) VALUES (100, 99)",
+    "stdout": "",
+    "error": "NOT NULL constraint violated: 'users'.name received NULL"
+  },
+  {
+    "category": "Transactions",
+    "name": "COMMIT — DML persisted",
+    "passed": true,
+    "command": "SELECT * FROM users WHERE id = 200",
+    "stdout": "[(200, 'tx1', 1)]",
+    "error": ""
+  },
+  {
+    "category": "Transactions",
+    "name": "ROLLBACK — DML undone (0 rows)",
+    "passed": true,
+    "command": "SELECT * FROM users WHERE id = 201",
+    "stdout": "[]",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "Row present (1 row)",
+    "passed": true,
+    "command": "SELECT * FROM type_test",
+    "stdout": "[(42, 3.14, 'hello', True, datetime.date(2024, 1, 15), datetime.time(13, 45), datetime.datetime(2024, 1, 15, 13, 45), Decimal('12345.6789'), b'\\x00\\x01\\x02', {'k': 1})]",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "INT round-trip",
+    "passed": true,
+    "command": "(row[0])",
+    "stdout": "got=42",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "FLOAT round-trip",
+    "passed": true,
+    "command": "(row[1])",
+    "stdout": "got=3.14",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "TEXT round-trip",
+    "passed": true,
+    "command": "(row[2])",
+    "stdout": "got='hello'",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "BOOL round-trip",
+    "passed": true,
+    "command": "(row[3])",
+    "stdout": "got=True",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "DATE round-trip",
+    "passed": true,
+    "command": "(row[4])",
+    "stdout": "got=datetime.date(2024, 1, 15)",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "TIME round-trip",
+    "passed": true,
+    "command": "(row[5])",
+    "stdout": "got=datetime.time(13, 45)",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "DATETIME round-trip",
+    "passed": true,
+    "command": "(row[6])",
+    "stdout": "got=datetime.datetime(2024, 1, 15, 13, 45)",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "DECIMAL round-trip",
+    "passed": true,
+    "command": "(row[7])",
+    "stdout": "got=Decimal('12345.6789')",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "BLOB round-trip",
+    "passed": true,
+    "command": "(row[8])",
+    "stdout": "got=b'\\x00\\x01\\x02'",
+    "error": ""
+  },
+  {
+    "category": "Types",
+    "name": "JSON round-trip",
+    "passed": true,
+    "command": "(row[9])",
+    "stdout": "got={'k': 1}",
+    "error": ""
+  },
+  {
+    "category": "Persistence",
+    "name": "Reopen via recovery preserves rows",
+    "passed": true,
+    "command": "SELECT * FROM persist_demo ORDER BY id",
+    "stdout": "[(1, 'first'), (2, 'second')]",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "CREATE TABLE one-shot → OK",
+    "passed": true,
+    "command": "CREATE TABLE cli_demo (n INT)",
+    "stdout": "OK\n",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "INSERT one-shot → 3 row(s)",
+    "passed": true,
+    "command": "INSERT INTO cli_demo VALUES (1), (2), (3)",
+    "stdout": "3 row(s)\n",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "SELECT one-shot → real column header 'n'",
+    "passed": true,
+    "command": "SELECT * FROM cli_demo",
+    "stdout": "n\n1\n2\n3\n",
+    "error": ""
+  }
+]
