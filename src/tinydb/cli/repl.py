@@ -1,11 +1,17 @@
-"""tinydb CLI — Read-Eval-Print Loop (T-8.3, meta-commands in T-8.4).
+"""tinydb CLI — Read-Eval-Print Loop (T-8.3) + meta-commands (T-8.4).
 
 The REPL is intentionally injected (``input_fn``, ``output``) so tests
-can run it without touching real stdin/stdout.  Meta-commands (``.exit``
-/ ``.quit`` / ``.help`` / ``.tables`` / ``.schema``) are dispatched
-before the SQL parse path; that logic lands in T-8.4 — for now we
-expose :func:`dispatch_meta` as a stub that returns ``False`` so the
-REPL falls through to SQL.
+can run it without touching real stdin/stdout.
+
+Meta-commands (prefixed with ``.``) are dispatched before the SQL
+parse path; supported commands in v0.1 are:
+
+* ``.exit`` / ``.quit`` — leave the REPL with exit code 0.
+* ``.help``             — print a short summary of every meta-command.
+* ``.tables``           — list every table in the catalog.
+* ``.schema``           — dump a reconstructed ``CREATE TABLE``
+                          statement for every table.
+* ``.anything-else``    — print "unknown command" and continue.
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from typing import Callable, List
 from tinydb.api import Database
 from tinydb.cli.format import format_rows
 from tinydb.errors import ParseError, TinydbError
+from tinydb.types.system import Column, TypeTag
 
 
 # Type aliases — make the injected callables self-documenting in
@@ -22,15 +29,94 @@ InputFn = Callable[[str], str]
 OutputFn = Callable[[str], None]
 
 
-def dispatch_meta(line: str, db: Database, output: OutputFn) -> bool:
-    """Hook for ``.<cmd>`` handlers (T-8.4 will fill this in).
+# --- .schema support: rebuild CREATE TABLE from catalog Column objects.
+#
+# The original CREATE TABLE source is not stored on disk; we reconstruct
+# it from the Column metadata at dump time.  Type tags map to a single
+# canonical SQL name; constraint order (PRIMARY KEY, UNIQUE, NOT NULL)
+# is fixed so dumps are stable.
+_TAG_TO_SQL: dict = {
+    TypeTag.Int: "INT",
+    TypeTag.Float: "FLOAT",
+    TypeTag.Text: "TEXT",
+    TypeTag.Bool: "BOOL",
+    TypeTag.Date: "DATE",
+    TypeTag.Time: "TIME",
+    TypeTag.Datetime: "DATETIME",
+    TypeTag.Decimal: "DECIMAL",
+    TypeTag.Blob: "BLOB",
+    TypeTag.Json: "JSON",
+}
 
-    Returns True if ``line`` was a meta-command and was handled, False
-    if the caller should continue with the SQL path.  v0.3 always
-    returns False; T-8.4 expands it to dispatch ``.exit`` / ``.quit``
-    / ``.help`` / ``.tables`` / ``.schema``.
+
+def _column_to_sql(col: Column) -> str:
+    parts = [col.name, _TAG_TO_SQL.get(col.tag, col.tag.name)]
+    if col.primary_key:
+        parts.append("PRIMARY KEY")
+    elif col.unique:
+        parts.append("UNIQUE")
+    if col.not_null:
+        parts.append("NOT NULL")
+    return " ".join(parts)
+
+
+def _build_create_table_sql(table_name: str, columns) -> str:
+    cols_sql = ", ".join(_column_to_sql(c) for c in columns)
+    return f"CREATE TABLE {table_name} ({cols_sql});"
+
+
+# --- meta-command dispatch ---------------------------------------------
+#
+# Tri-state return:
+#   False           — not a meta-command, caller falls through to SQL.
+#   True            — meta-command handled, REPL keeps reading.
+#   "exit"          — meta-command requested shutdown, REPL returns 0.
+
+
+_HELP_TEXT: str = (
+    ".exit  / .quit    leave the REPL\n"
+    ".help             show this help\n"
+    ".tables           list every table in the catalog\n"
+    ".schema           dump CREATE TABLE for every table"
+)
+
+
+def dispatch_meta(line: str, db: Database, output: OutputFn):
+    """Dispatch a single REPL line.
+
+    Returns ``False`` if the line is not a meta-command (caller
+    continues with the SQL path); ``True`` if it was handled and the
+    REPL should continue; the string ``"exit"`` if the REPL should
+    terminate with exit code 0.
     """
-    return False
+    stripped = line.strip()
+    if not stripped.startswith("."):
+        return False
+    cmd = stripped.split(None, 1)[0].lower()
+    if cmd in {".exit", ".quit"}:
+        output("bye.")
+        return "exit"
+    if cmd == ".help":
+        output(_HELP_TEXT)
+        return True
+    if cmd == ".tables":
+        names = db.catalog.list_tables()
+        if names:
+            output("\n".join(names))
+        else:
+            output("(no tables)")
+        return True
+    if cmd == ".schema":
+        any_table = False
+        for name in db.catalog.list_tables():
+            meta = db.catalog.get_table(name)
+            output(_build_create_table_sql(name, meta.columns))
+            any_table = True
+        if not any_table:
+            output("(no tables)")
+        return True
+    output(f"unknown command {stripped!r}; type .help for the list")
+    return True
 
 
 def run_repl(
@@ -39,19 +125,7 @@ def run_repl(
     input_fn: InputFn = input,
     output: OutputFn = print,
 ) -> int:
-    """Drive the REPL.  Returns the process exit code (0 normally).
-
-    The loop:
-    1. Reads one line at a time via ``input_fn``.
-    2. Strips whitespace; empty lines are no-ops.
-    3. Tries :func:`dispatch_meta` first (T-8.4).  Falls through to
-       :meth:`Database.execute` on False.
-    4. Renders SELECT results via :func:`format_rows`; DML rows
-       (``[(affected_count,)]``) are rendered the same way so the user
-       sees ``1`` after an INSERT.
-    5. Catches :class:`ParseError` and :class:`TinydbError` and prints
-       a short error message; the loop never exits on user input.
-    """
+    """Drive the REPL.  Returns the process exit code (0 normally)."""
     output("tinydb v0.1 REPL — enter SQL, or '.help' for commands")
     while True:
         try:
@@ -61,8 +135,10 @@ def run_repl(
         line = line.strip()
         if not line:
             continue
-        # Meta-command hook (T-8.4 wires .exit / .quit / .help / etc.).
-        if dispatch_meta(line, db, output):
+        handled = dispatch_meta(line, db, output)
+        if handled == "exit":
+            return 0
+        if handled:
             continue
         try:
             rows = db.execute(line)
@@ -72,10 +148,14 @@ def run_repl(
         except TinydbError as exc:
             output(f"Error: {exc}")
             continue
-        # SELECT returns rows; DML returns [(affected,)]; DDL returns [].
         if rows:
             output(format_rows(rows))
     return 0
 
 
-__all__ = ["InputFn", "OutputFn", "dispatch_meta", "run_repl"]
+__all__ = [
+    "InputFn",
+    "OutputFn",
+    "dispatch_meta",
+    "run_repl",
+]
