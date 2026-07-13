@@ -20,6 +20,10 @@ from typing import Callable, List
 from tinydb.api import Database
 from tinydb.cli.format import format_rows
 from tinydb.errors import ParseError, TinydbError
+from tinydb.executor.ops import result_columns
+from tinydb.executor.planner import plan as _plan
+from tinydb.sql.ast import CreateTable, DropTable
+from tinydb.sql.parser import parse
 from tinydb.types.system import Column, TypeTag
 
 
@@ -170,16 +174,41 @@ def run_repl(
             return 0
         if handled:
             continue
+        # T-POLISH: parse first so we can detect DDL and grab column
+        # metadata for SELECT formatting before dispatching.  DDL prints
+        # "OK"; SELECTs get real column names from the plan tree.
         try:
-            rows = db.execute(line)
+            stmt = parse(line)
         except ParseError as exc:
             output(f"ParseError: {exc.msg} (line {exc.line}, col {exc.col})")
             continue
+        if isinstance(stmt, (CreateTable, DropTable)):
+            try:
+                db.execute(line)
+            except TinydbError as exc:
+                output(f"Error: {exc}")
+                continue
+            output("OK")
+            continue
+        # DML / SELECT: plan to get column labels, then execute.
+        try:
+            columns = result_columns(
+                _plan(stmt, db.catalog, db.executor.indexer)
+            )
+        except TinydbError:
+            columns = None
+        try:
+            rows = db.execute(line)
         except TinydbError as exc:
             output(f"Error: {exc}")
             continue
-        if rows:
-            output(format_rows(rows))
+        if not rows:
+            continue  # SELECT-with-no-match is silent.
+        if columns is None:
+            # DML affected-count row: print plainly, not as a column table.
+            output(f"{rows[0][0]} row(s)")
+            continue
+        output(format_rows(rows, columns=columns))
     return 0
 
 

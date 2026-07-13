@@ -341,6 +341,32 @@ def _sort_key(col_idx: dict, keys: Sequence[tuple]):
     return encode
 
 
+def result_columns(plan: Plan) -> Optional[Sequence[str]]:
+    """Walk ``plan`` and return the result-row column labels.
+
+    T-POLISH: lets the CLI replace the legacy ``col0``/``col1`` fallback
+    with real names from the topmost plan that carries a ``.columns``
+    attribute.  Returns ``None`` when no plan in the chain advertises
+    columns (e.g. DML leaf plans, an empty ``SeqScan``) so the caller
+    can decide whether to fall back.
+
+    Walks ``Sort`` / ``Limit`` wrappers down to the underlying
+    :class:`Project` or :class:`Aggregate`.  ``Aggregate`` exposes
+    result columns as ``(group_keys..., agg_labels...)`` mirroring
+    its row layout.
+    """
+    cur = plan
+    # Strip Limit / Sort wrappers (they don't carry output columns).
+    while isinstance(cur, (Limit, Sort)):
+        cur = cur.src
+    if isinstance(cur, Project):
+        return list(cur.columns)
+    if isinstance(cur, Aggregate):
+        agg_labels = [f"{func}({col})" for func, col in cur.aggregates]
+        return list(cur.keys) + agg_labels
+    return None
+
+
 # Lazy re-export for Aggregate — its module imports Plan from here,
 # so a top-level import is circular.  ``__getattr__`` resolves it
 # the first time something does ``from tinydb.executor.ops import
@@ -371,6 +397,7 @@ __all__ = [
     "Sort",
     "Limit",
     "Aggregate",
+    "result_columns",
     # Re-exported from tinydb.executor.dml for backward compatibility.
     "Insert",
     "Update",

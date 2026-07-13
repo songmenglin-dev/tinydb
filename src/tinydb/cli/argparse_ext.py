@@ -18,6 +18,10 @@ from tinydb._version import __version__
 from tinydb.api import Database
 from tinydb.cli.format import format_rows
 from tinydb.errors import ParseError, TinydbError
+from tinydb.executor.ops import result_columns
+from tinydb.executor.planner import plan as _plan
+from tinydb.sql.ast import CreateTable, DropTable
+from tinydb.sql.parser import parse
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,18 +70,50 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 def _run_one(db: Database, sql: str) -> int:
-    """Execute one SQL statement; print rows or error; return exit code."""
+    """Execute one SQL statement; print rows / error / "OK"; return exit code.
+
+    T-POLISH: DDL (CREATE/DROP TABLE) prints "OK"; SELECT prints rows
+    with real column names from the plan tree (no more ``col0/col1``).
+    INSERT/UPDATE/DELETE affected-count renders as plain "<n> row(s)".
+    """
+    # Parse first so we can detect DDL and extract column metadata before
+    # running the statement.  db.execute() also parses internally but
+    # only returns ``list[tuple]``; we need the AST/plan for the two
+    # polish features so we duplicate the cheap parse+plan here.
     try:
-        rows = db.execute(sql)
+        stmt = parse(sql)
     except ParseError as exc:
         print(f"ParseError: {exc.msg} (line {exc.line}, col {exc.col})",
               file=sys.stderr)
         return 1
+    # DDL: confirm with "OK" before dispatching so the user sees feedback.
+    if isinstance(stmt, (CreateTable, DropTable)):
+        try:
+            db.execute(sql)
+        except TinydbError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print("OK")
+        return 0
+    # DML/SELECT: plan to grab column labels, then execute.
+    try:
+        columns = result_columns(_plan(stmt, db.catalog, db.executor.indexer))
+    except TinydbError:
+        columns = None  # DML plans don't carry a Project/Aggregate.
+    try:
+        rows = db.execute(sql)
     except TinydbError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
-    if rows:
-        print(format_rows(rows))
+    if not rows:
+        return 0  # SELECT-with-no-match is silent.
+    if columns is None:
+        # DML affected-count row: format plainly instead of a misleading
+        # ``col0`` table.
+        affected = rows[0][0]
+        print(f"{affected} row(s)")
+        return 0
+    print(format_rows(rows, columns=columns))
     return 0
 
 

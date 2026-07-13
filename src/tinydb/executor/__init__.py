@@ -19,6 +19,7 @@ from tinydb.executor.ops import (
     SeqScan,
     Sort,
     Update,
+    result_columns,
 )
 from tinydb.executor.planner import plan
 
@@ -40,4 +41,5 @@ __all__ = [
     "IndexLookup",
     "IndexablePredicate",
     "extract_indexable",
+    "result_columns",
 ]

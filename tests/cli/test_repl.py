@@ -50,9 +50,10 @@ def test_select_outputs_table(tmp_path) -> None:
         rc = run_repl(db, input_fn=fake_input, output=captured.append)
         assert rc == 0
         joined = "\n".join(captured)
-        # Executor returns list[tuple] without column names; the REPL
-        # renders them via format_rows, which auto-generates col0/col1.
-        assert "col0" in joined
+        # T-POLISH: SELECT headers now come from the table schema, so
+        # the row data + column names from the SELECT output.
+        assert "id" in joined
+        assert "name" in joined
         assert "alice" in joined
     finally:
         db.close()
