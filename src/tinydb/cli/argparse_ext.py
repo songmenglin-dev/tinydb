@@ -1,28 +1,27 @@
-"""Argparse dispatcher for the tinydb CLI (T-8.1).
+"""Argparse dispatcher for the tinydb CLI (T-8.1, wired in T-8.5).
 
-Three modes:
-- ``python -m tinydb --db <path> -c '<sql>'`` → run one command, exit.
-- ``python -m tinydb --db <path>`` → enter REPL (T-8.3).
+Modes:
+- ``python -m tinydb --db <path> -c '<sql>'`` → run one SQL and exit.
+- ``python -m tinydb --db <path>`` → enter REPL (T-8.3 + T-8.4).
 - ``python -m tinydb --help`` / ``--version`` → argparse standard exits.
 
-Returns a ``Namespace`` with at least ``db``, ``command``, ``version``.
+``main()`` returns a process exit code; ``tinydb/__main__.py`` calls
+``sys.exit(main())``.
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from typing import List, Optional
 
 from tinydb._version import __version__
+from tinydb.api import Database
+from tinydb.cli.format import format_rows
+from tinydb.errors import ParseError, TinydbError
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the ArgumentParser used by :func:`parse_args`.
-
-    ``--db`` is required, except when ``--version`` is the sole flag —
-    in that case :func:`parse_args` returns a Namespace with
-    ``version=True`` and ``db=None`` so the version path can short-
-    circuit without the user supplying a database path.
-    """
+    """Construct the ArgumentParser used by :func:`parse_args`."""
     parser = argparse.ArgumentParser(
         prog="tinydb",
         description=(
@@ -30,70 +29,55 @@ def build_parser() -> argparse.ArgumentParser:
             "Run a single SQL statement with -c, or omit it for the REPL."
         ),
     )
-    parser.add_argument(
-        "--db",
-        required=False,
-        default=None,
-        help="Path to the database file (created if missing).",
-    )
-    parser.add_argument(
-        "-c",
-        "--command",
-        default=None,
-        help="Run a single SQL statement and exit.",
-    )
-    parser.add_argument(
-        "--version",
-        action="store_true",
-        help="Print the tinydb version and exit.",
-    )
+    parser.add_argument("--db", default=None,
+                        help="Path to the database file (created if missing).")
+    parser.add_argument("-c", "--command", default=None,
+                        help="Run a single SQL statement and exit.")
+    parser.add_argument("--version", action="store_true",
+                        help="Print the tinydb version and exit.")
     return parser
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    """Parse ``argv`` (or ``sys.argv[1:]`` if ``None``) into a Namespace.
-
-    Enforces ``--db`` *only* when ``--version`` is not requested, and
-    raises ``SystemExit(0)`` after printing the version when
-    ``--version`` is set — matching the convention used by
-    ``sqlite3 --version`` and friends.
-    """
-    import sys
-
+    """Parse argv; --version without --db short-circuits to SystemExit(0)."""
     parser = build_parser()
-    # Pre-flight: did the caller ask for --version?  We check the raw
-    # token list so we can short-circuit before the --db requirement.
     raw = list(sys.argv[1:]) if argv is None else list(argv)
     if "--version" in raw and "--db" not in raw:
-        # Parse with --db temporarily optional just to capture --version,
-        # then exit cleanly — argparse's own action="version" would do
-        # this but it would require --db to be optional too, which we
-        # can't express conditionally.
         print(__version__)
         raise SystemExit(0)
     ns = parser.parse_args(argv)
     if ns.db is None:
-        # Mirror argparse's "the following arguments are required: --db"
-        # error so callers see a consistent SystemExit(2).
         parser.error("the following arguments are required: --db")
     return ns
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """Top-level entry used by both ``tinydb/__main__.py`` and tests.
-
-    For T-8.1 we only verify the dispatcher; the actual SQL/REPL
-    execution is wired in T-8.5.  For now: with ``-c`` we exit 0
-    (real execution arrives in T-8.5); without it we exit 0 too (REPL
-    arrives in T-8.3).  ``--version`` prints the version and exits 0.
-    ``--help`` is handled by argparse.
-    """
+    """Dispatch argv → one SQL, REPL, or --version."""
     ns = parse_args(argv)
     if ns.version:
         print(__version__)
         return 0
-    # One-shot SQL execution + REPL routing are added in T-8.3 / T-8.5.
-    # The dispatcher shape (db, command, version) is in place.
+    with Database(ns.db) as db:
+        if ns.command is not None:
+            return _run_one(db, ns.command)
+        from tinydb.cli.repl import run_repl  # defer import
+        return run_repl(db)
+    return 0
+
+
+def _run_one(db: Database, sql: str) -> int:
+    """Execute one SQL statement; print rows or error; return exit code."""
+    try:
+        rows = db.execute(sql)
+    except ParseError as exc:
+        print(f"ParseError: {exc.msg} (line {exc.line}, col {exc.col})",
+              file=sys.stderr)
+        return 1
+    except TinydbError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if rows:
+        print(format_rows(rows))
     return 0
 
 

@@ -29,6 +29,32 @@ InputFn = Callable[[str], str]
 OutputFn = Callable[[str], None]
 
 
+def _default_output(line: str) -> None:
+    """Resolve ``print`` lazily so capture-mode pytest doesn't break us.
+
+    Binding ``output = print`` at module import captures whatever
+    ``print`` was at that instant — fine for normal use, but pytest's
+    stdout-capture wraps ``sys.stdout`` and breaks calls to the
+    captured reference.  Resolving through ``builtins.print`` each call
+    lets pytest's wrapper install/uninstall freely.
+    """
+    import builtins
+
+    builtins.print(line, flush=True)
+
+
+def _default_input(prompt: str) -> str:
+    """Resolve ``input`` lazily so monkeypatched builtins.input is honoured.
+
+    Same rationale as :func:`_default_output`: pytest wraps stdin and
+    tests may monkeypatch ``builtins.input``.  Binding ``input`` at
+    module import would freeze a reference that ignores both.
+    """
+    import builtins
+
+    return builtins.input(prompt)
+
+
 # --- .schema support: rebuild CREATE TABLE from catalog Column objects.
 #
 # The original CREATE TABLE source is not stored on disk; we reconstruct
@@ -122,10 +148,14 @@ def dispatch_meta(line: str, db: Database, output: OutputFn):
 def run_repl(
     db: Database,
     *,
-    input_fn: InputFn = input,
-    output: OutputFn = print,
+    input_fn: InputFn = _default_input,
+    output: OutputFn = _default_output,
 ) -> int:
-    """Drive the REPL.  Returns the process exit code (0 normally)."""
+    """Drive the REPL.  Returns the process exit code (0 normally).
+
+    ``output`` defaults to a lazy wrapper around :func:`print` so the
+    REPL keeps working under pytest's stdout-capture fixture.
+    """
     output("tinydb v0.1 REPL — enter SQL, or '.help' for commands")
     while True:
         try:
