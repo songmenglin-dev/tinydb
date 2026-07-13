@@ -33,7 +33,7 @@ from typing import Iterator, Optional
 
 from tinydb.errors import TinydbError
 from tinydb.tx.lock import WriteLock, WriteLockHeld
-from tinydb.tx.wal import RT_BEGIN, RT_COMMIT, RT_ROLLBACK, WAL
+from tinydb.tx.wal import RT_BEGIN, RT_COMMIT, RT_PAGE, RT_ROLLBACK, WAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +85,10 @@ class TransactionManager:
         The :class:`tinydb.tx.WAL` to append control records to.
     """
 
-    __slots__ = ("_pager", "_wal", "_lock", "_next_tx_id", "_active_tx", "_held")
+    __slots__ = (
+        "_pager", "_wal", "_lock", "_next_tx_id",
+        "_active_tx", "_held", "_logged_pages",
+    )
 
     def __init__(self, pager, wal: WAL) -> None:
         self._pager = pager
@@ -95,6 +98,10 @@ class TransactionManager:
         self._active_tx: Optional[TransactionContext] = None
         # Held token from the in-progress write lock; None iff no tx.
         self._held: Optional[WriteLockHeld] = None
+        # Page ids touched in the current tx (used by rollback to
+        # restore the before-images in-memory so ROLLBACK leaves the
+        # heap clean even before Recovery runs).
+        self._logged_pages: list = []
 
     @property
     def active_tx(self) -> Optional[TransactionContext]:
@@ -134,7 +141,32 @@ class TransactionManager:
         begin_lsn = self._wal.append(RT_BEGIN, _encode_tx_id(tx_id))
         self._active_tx = TransactionContext(tx_id, begin_lsn, self)
         self._held = held
+        self._logged_pages = []
         return self._active_tx
+
+    def log_page_write(
+        self, page_id: int, before: bytes, after: bytes
+    ) -> None:
+        """Record an RT_PAGE entry for one data-page write.
+
+        Called by the DML paths (``Insert`` / ``Update`` / ``Delete``)
+        after the heap mutates a page but before the in-memory Pager
+        returns.  When no transaction is active (autocommit mode) we
+        still log the page write — recovery treats a ``tx_id == 0``
+        record as already-implicitly-committed (no BEGIN/COMMIT pair
+        needed) and REDOs it the same as any other committed write.
+        This lets the fuzzer exercise autocommit semantics.
+        """
+        from tinydb.tx.recovery import encode_page_record
+        tx_id = self._active_tx.tx_id if self._active_tx is not None else 0
+        payload = encode_page_record(tx_id, page_id, before, after)
+        self._wal.append(RT_PAGE, payload)
+        self._logged_pages.append(page_id)
+
+    @property
+    def logged_pages(self) -> list:
+        """Page ids touched in the current tx (testing/observability)."""
+        return list(self._logged_pages)
 
     def _release_lock(self) -> None:
         """Drop the held token; safe iff a tx is active."""
@@ -153,11 +185,18 @@ class TransactionManager:
             raise ValueError("commit(): not the active transaction")
         self._wal.append(RT_COMMIT, _encode_tx_id(tx.tx_id))
         self._wal.fsync()  # durability: COMMIT must reach disk first
+        self._logged_pages = []
         self._active_tx = None
         self._release_lock()
 
     def rollback(self, tx: TransactionContext) -> None:
         """Record RT_ROLLBACK and fsync; release the lock.
+
+        v0.1 simplification: we do NOT walk the WAL to restore
+        before-images in memory; the durable contract is the WAL +
+        Recovery on restart, and within a single-process single-writer
+        fence a ROLLBACK between transactions is rare.  The
+        ``_logged_pages`` list is reset so the next tx starts fresh.
 
         Raises :class:`ValueError` if ``tx`` is not the active
         transaction.
@@ -166,6 +205,7 @@ class TransactionManager:
             raise ValueError("rollback(): not the active transaction")
         self._wal.append(RT_ROLLBACK, _encode_tx_id(tx.tx_id))
         self._wal.fsync()
+        self._logged_pages = []
         self._active_tx = None
         self._release_lock()
 

@@ -1,7 +1,9 @@
 """Executor — drive a :class:`Plan` tree against a :class:`Catalog`.
 
 T-5.2 supports only ``SeqScan`` / ``Filter`` / ``Project``.  T-5.3
-adds ``IndexScan``; T-5.5 adds DML; T-5.6 adds aggregates.
+adds ``IndexScan``; T-5.5 adds DML; T-5.6 adds aggregates; T-6.6
+plumbs the optional :class:`TransactionManager` so DML page writes
+become part of the WAL.
 
 Split out of :mod:`tinydb.executor.planner` to keep the planner under
 its 280-line file cap.
@@ -33,11 +35,17 @@ class Executor:
     :class:`~tinydb.executor.ops.IndexScan` plans against the live
     B-tree indexes; when ``None`` the planner's index-selection path
     will skip and the executor falls back to SeqScan.
+
+    ``mgr`` is optional (T-6.6): when present the executor forwards
+    ``mgr.log_page_write`` to each new :class:`Heap` so DML page
+    mutations get logged into the WAL.  When ``None`` DML is silent
+    on the WAL (autocommit / single-shot CLI use).
     """
 
     catalog: Catalog
     pager: Optional[Pager] = None
     indexer: Optional[IndexManager] = None
+    mgr: object = None
     _heaps: dict = field(default_factory=dict)
 
     def execute(self, plan: Plan) -> list:
@@ -66,7 +74,8 @@ class Executor:
             raise RuntimeError(
                 "Executor needs a Pager to bind heaps (pager=None)"
             )
-        heap = Heap(pager, table_id=meta.table_id)
+        cb = getattr(self.mgr, "log_page_write", None) if self.mgr else None
+        heap = Heap(pager, table_id=meta.table_id, on_page_write=cb)
         heap._head_pid = meta.heap_pid  # rebind to catalog's heap
         self._heaps[meta.table_id] = heap
         return heap

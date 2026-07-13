@@ -15,6 +15,13 @@ NULL values are special-cased: a Python ``None`` is encoded as a
 single ``TypeTag.Null`` byte regardless of the column tag (see
 :func:`encode_row_coerced`), so SQL NULLs round-trip uniformly
 through the heap + SELECT pipeline.
+
+T-6.6 — when the executor was constructed with a transaction manager
+(``ctx.mgr is not None``), each ``heap.insert`` / ``heap.delete``
+records a whole-page before/after image into the WAL through
+:meth:`TransactionManager.log_page_write`.  The recovery layer uses
+those records to REDO committed writes and UNDO uncommitted ones on
+restart.
 """
 
 from __future__ import annotations
@@ -54,14 +61,17 @@ def _dml_context(ctx: "Executor", table: str) -> tuple:
     Centralises the meta/tags/n2i/heap setup.  The Heap is bound
     through :func:`tinydb.executor.heap_bind.bind_heap` so we reuse
     the catalog's heap chain rather than allocating a fresh page
-    (T-5.2 NIT-10).
+    (T-5.2 NIT-10).  T-6.6 forwards ``ctx.mgr.log_page_write`` as the
+    heap's page-write callback so DML writes flow into the WAL.
     """
     from tinydb.executor.heap_bind import bind_heap
 
     meta = ctx.catalog.get_table(table)
     tags = tuple(c.tag for c in meta.columns)
     n2i = {c.name: i for i, c in enumerate(meta.columns)}
-    heap = bind_heap(ctx.catalog, table)
+    on_page_write = getattr(ctx, "mgr", None)
+    cb = on_page_write.log_page_write if on_page_write is not None else None
+    heap = bind_heap(ctx.catalog, table, on_page_write=cb)
     return meta, tags, n2i, heap
 
 

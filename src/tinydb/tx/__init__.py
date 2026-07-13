@@ -15,6 +15,7 @@ from tinydb.tx.manager import (
     TransactionContext,
     TransactionManager,
 )
+from tinydb.tx.recovery import Recovery
 from tinydb.tx.wal import (
     WAL,
     WALCorruptionError,
@@ -40,4 +41,5 @@ __all__ = [
     "TransactionManager",
     "TransactionContext",
     "NestedTransactionError",
+    "Recovery",
 ]
