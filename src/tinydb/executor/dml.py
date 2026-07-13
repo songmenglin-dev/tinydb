@@ -153,14 +153,20 @@ class Update:
             # Precheck UNIQUE before mutating the heap (T-6.4) — see
             # Insert.open for the rationale.
             new_row_tuple = tuple(new_row)
+            # T-7.2: when the PK / UNIQUE columns are unchanged by the
+            # UPDATE, ``check_unique`` would otherwise see the old
+            # self-entry and raise ConstraintViolation on every row
+            # (even no-op updates).  Drop the old index entry first so
+            # the precheck only sees the OTHER rows; the manager's
+            # on_delete removes the entry under the old Rid.
             if ctx.indexer is not None:
+                ctx.indexer.on_delete(self.table, rid, old_row)
                 ctx.indexer.check_unique(self.table, new_row_tuple)
             heap.delete(rid)
             new_rid = heap.insert(encode_row_coerced(new_row, tags))
             if ctx.indexer is not None:
-                # Rid changes (delete + insert): drop the old index
-                # entry, then add the new one.
-                ctx.indexer.on_delete(self.table, rid, old_row)
+                # The precheck above added nothing — on_insert now
+                # re-adds the entry under the new Rid.
                 ctx.indexer.on_insert(self.table, new_rid, new_row_tuple)
             affected += 1
         yield (affected,)

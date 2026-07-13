@@ -294,6 +294,12 @@ def encode_row_coerced(
         )
     out = bytearray()
     for v, t in zip(values, tags):
+        # TypedLiteral unwrap (T-7.2): the parser preserves
+        # ``DATE '...'`` / ``DECIMAL '...'`` as TypedLiteral AST nodes in
+        # the INSERT VALUES list so the executor can dispatch on the
+        # declared target tag.  Unwrap here so the downstream coerce
+        # path sees a plain Python value.
+        v = getattr(v, "value", v)
         if v is None:
             # TypeTag.Null covers SQL NULL — 1 byte.  The decoder
             # matches this and returns ``None`` back to the caller.

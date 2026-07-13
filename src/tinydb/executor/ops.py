@@ -232,6 +232,12 @@ class Sort(Plan):
             synth_offset = len(self.src.keys)
             for i, (func, column) in enumerate(self.src.aggregates):
                 col_idx[f"{func}({column})"] = synth_offset + i
+        elif isinstance(self.src, Project):
+            # Sort wraps Project (the planner's normal SELECT shape): the
+            # post-project row layout is the Project's ``columns`` list,
+            # not the underlying table's full schema.  Without this,
+            # Sort would index into a tuple shorter than the column map.
+            col_idx = {col: i for i, col in enumerate(self.src.columns)}
         else:
             col_idx = ctx.name_to_idx_for(self.table)
         for col, _ in self.keys:
@@ -269,12 +275,51 @@ class Limit(Plan):
 
 
 def _neg(value: Any) -> Any:
-    """Negate a comparable for DESC sort.  None is filtered upstream."""
+    """Invert a comparable for DESC sort.  None is filtered upstream.
+
+    Numeric / bool values are arithmetic-negated; everything else
+    (str, bytes, Decimal, datetime, ...) is wrapped in a sentinel that
+    reverses the ordering on the sort key — ``(0, value)`` sorts
+    ascending against the rest of the key, so multiplying by ``-1``
+    inverts the comparison naturally for non-numerics too.
+    """
     if isinstance(value, bool):
         return not value
     if isinstance(value, (int, float)):
         return -value
-    raise TypeError(f"DESC sort: cannot negate {type(value).__name__}")
+    # Non-numeric: invert the natural order by flipping the (asc, val)
+    # sort-tuple convention used below.  ``(1, 0)`` sorts BEFORE
+    # ``(0, val)`` under the default tuple ordering, so non-numeric
+    # DESC rows come last-but-one, not first.  This is the standard
+    # trick for ordering non-numerics in reverse.
+    return _NegMarker(value)
+
+
+class _NegMarker:
+    """Sort-key wrapper that flips ASC ordering on a non-numeric value.
+
+    Two markers compare by their wrapped value but inverted: ``a < b``
+    becomes ``b < a``.  Encoded tuples still keep the (asc, val) shape
+    above the marker so NULL ordering continues to work.
+    """
+    __slots__ = ("value",)
+
+    def __init__(self, value: Any) -> None:
+        self.value = value
+
+    def __lt__(self, other: "_NegMarker") -> bool:
+        if not isinstance(other, _NegMarker):
+            return NotImplemented
+        # Invert: a is "less than" b iff b < a in the natural order.
+        return other.value < self.value
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _NegMarker):
+            return NotImplemented
+        return self.value == other.value
+
+    def __repr__(self) -> str:
+        return f"_NegMarker({self.value!r})"
 
 
 def _sort_key(col_idx: dict, keys: Sequence[tuple]):

@@ -100,6 +100,19 @@ class Database:
         # DDL is handled here so the planner stays DML-only (T-5.1).
         if isinstance(stmt, CreateTable):
             self._catalog.create_table(stmt.name, stmt.columns)
+            # T-7.2: surface PRIMARY KEY by auto-creating a unique
+            # index on the column.  v0.1 stores the PK flag but does
+            # not enforce it; routing the constraint through the
+            # existing IndexManager lets the same UNIQUE-precheck path
+            # reject duplicate-key inserts with ConstraintViolation.
+            for col in stmt.columns:
+                if col.primary_key:
+                    self._indexer.create_index(
+                        f"pk_{stmt.name}_{col.name}",
+                        stmt.name,
+                        [col.name],
+                        unique=True,
+                    )
             return []
         if isinstance(stmt, DropTable):
             if stmt.name in self._catalog.list_tables():

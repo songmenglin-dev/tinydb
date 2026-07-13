@@ -194,8 +194,35 @@ def _project_columns(stmt: Select, meta: TableMeta) -> list:
 
 
 def _plan_insert(stmt: InsertStmt, catalog: Catalog) -> Plan:
-    _require_table(stmt.table, catalog)
-    return InsertPlan(table=stmt.table, values=stmt.values)
+    meta = _require_table(stmt.table, catalog)
+    # If the user supplied an explicit column list, expand each VALUES
+    # row into the table's full column order, substituting NULL for
+    # any column not named in the list.  T-7.2 closes the gap between
+    # the parser (which already supports ``INSERT INTO t (a, c)``) and
+    # the executor (which only accepted full-width rows).
+    if stmt.columns is None:
+        expanded = stmt.values
+    else:
+        col_names = [c.name for c in meta.columns]
+        for name in stmt.columns:
+            if name not in col_names:
+                raise UnknownColumnError(
+                    f"{stmt.table!r}.{name!r}"
+                )
+        idx_map = [col_names.index(c) for c in stmt.columns]
+        expanded = []
+        for row in stmt.values:
+            if len(row) != len(stmt.columns):
+                raise ValueError(
+                    f"INSERT into {stmt.table!r}: "
+                    f"{len(stmt.columns)} columns named but "
+                    f"{len(row)} values supplied"
+                )
+            full = [None] * len(col_names)
+            for i, val in zip(idx_map, row):
+                full[i] = val
+            expanded.append(tuple(full))
+    return InsertPlan(table=stmt.table, values=tuple(expanded))
 
 
 def _plan_update(stmt: UpdateStmt, catalog: Catalog) -> Plan:
