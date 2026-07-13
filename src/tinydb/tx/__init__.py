@@ -9,6 +9,7 @@ Public surface:
 - Recovery                           (T-6.6)
 - Checkpoint                         (T-6.7)
 """
+from tinydb.tx.checkpoint import Checkpoint
 from tinydb.tx.lock import WriteLock, WriteLockHeld
 from tinydb.tx.manager import (
     NestedTransactionError,
@@ -28,6 +29,7 @@ from tinydb.tx.wal import (
 )
 
 __all__ = [
+    "Checkpoint",
     "WriteLock",
     "WriteLockHeld",
     "WAL",
