@@ -21,7 +21,7 @@ from tinydb.errors import ParseError
 from tinydb.executor.executor import Executor
 from tinydb.executor.planner import plan as _plan
 from tinydb.index.manager import IndexManager
-from tinydb.sql.ast import CreateTable, DropTable
+from tinydb.sql.ast import CreateIndex, CreateTable, DropTable
 from tinydb.sql.parser import parse
 from tinydb.storage.buffer_pool import BufferPool
 from tinydb.storage.catalog import Catalog
@@ -116,7 +116,17 @@ class Database:
             return []
         if isinstance(stmt, DropTable):
             if stmt.name in self._catalog.list_tables():
+                # Drop indexes that belong to this table first so the
+                # catalog doesn't carry orphan IndexMeta entries for a
+                # table that no longer exists.
+                for idx_name in list(self._indexer.list_indexes(stmt.name)):
+                    self._indexer.drop_index(idx_name)
                 self._catalog.drop_table(stmt.name)
+            return []
+        if isinstance(stmt, CreateIndex):
+            self._indexer.create_index(
+                stmt.name, stmt.table, list(stmt.columns), unique=stmt.unique,
+            )
             return []
         plan = _plan(stmt, self._catalog, indexer=self._indexer)
         return self._executor.execute(plan)

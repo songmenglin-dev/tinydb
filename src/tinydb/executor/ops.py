@@ -220,31 +220,44 @@ class Sort(Plan):
         if not self.keys:
             yield from rows
             return
-        # T-5.6: when Sort wraps an Aggregate plan, the post-aggregate
-        # row layout is ``(key_0, key_1, ..., agg_0, agg_1, ...)``.
-        # Build a synthetic column→index map for the group keys so
-        # ORDER BY <group_col> works.  Aggregate columns are
-        # referenced in the SQL by name (``COUNT(*)``); ORDER BY
-        # against an aggregate is rare in v0.1 and resolves to the
-        # synthesized name below.
+
+        # `sort_rows` is the rows we'll sort.  By default it's the
+        # upstream-projected rows; we may switch to base rows below
+        # if a sort key isn't in the projected columns.
+        sort_rows = rows
+        post_proj_indices = None
+
         if isinstance(self.src, AggregatePlan):
             col_idx = {col: i for i, col in enumerate(self.src.keys)}
             synth_offset = len(self.src.keys)
             for i, (func, column) in enumerate(self.src.aggregates):
                 col_idx[f"{func}({column})"] = synth_offset + i
         elif isinstance(self.src, Project):
-            # Sort wraps Project (the planner's normal SELECT shape): the
-            # post-project row layout is the Project's ``columns`` list,
-            # not the underlying table's full schema.  Without this,
-            # Sort would index into a tuple shorter than the column map.
-            col_idx = {col: i for i, col in enumerate(self.src.columns)}
+            base_idx = ctx.name_to_idx_for(self.table)
+            proj_labels = list(self.src.columns)
+            proj_idx = {c: i for i, c in enumerate(proj_labels)}
+            needs_base = any(col not in proj_idx for col, _ in self.keys)
+            if needs_base:
+                # Re-open the upstream of Project (the underlying Scan)
+                # and sort over the BASE table's rows, then project.
+                sort_rows = list(self.src.src.open(ctx))
+                col_idx = base_idx
+                post_proj_indices = tuple(base_idx[c] for c in proj_labels)
+            else:
+                col_idx = proj_idx
         else:
             col_idx = ctx.name_to_idx_for(self.table)
+
         for col, _ in self.keys:
             if col not in col_idx:
                 raise UnknownColumnError(f"{self.table}.{col}")
-        rows.sort(key=_sort_key(col_idx, self.keys))
-        yield from rows
+
+        sort_rows.sort(key=_sort_key(col_idx, self.keys))
+
+        if post_proj_indices is not None:
+            yield from (tuple(r[i] for i in post_proj_indices) for r in sort_rows)
+        else:
+            yield from sort_rows
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

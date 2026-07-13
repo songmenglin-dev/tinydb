@@ -90,6 +90,11 @@ def _eval_binary(expr: BinaryOp, row: tuple, name_to_idx: dict) -> Any:
         return _eq(left, right)
     if op == "!=":
         return not _eq(left, right)
+    # SQL three-valued logic: any comparison involving NULL is NULL
+    # (treated as false by WHERE).  Returning None here makes the
+    # Filter op drop the row.
+    if left is None or right is None:
+        return None
     if op == "<":
         return left < right
     if op == "<=":

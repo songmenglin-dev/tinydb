@@ -39,6 +39,7 @@ from tinydb.sql.ast import (
     Assignment,
     BinaryOp,
     ColumnRef,
+    CreateIndex,
     CreateTable,
     Delete,
     DropTable,
@@ -179,7 +180,7 @@ class _Parser:
         """Dispatch on the leading keyword (CREATE / DROP)."""
         tok = self._peek()
         if tok.kind is TokenKind.KEYWORD and tok.value == "CREATE":
-            return self._parse_create_table()
+            return self._parse_create_or_index()
         if tok.kind is TokenKind.KEYWORD and tok.value == "DROP":
             return self._parse_drop_table()
         raise ParseError(
@@ -187,10 +188,43 @@ class _Parser:
             f"expected CREATE or DROP, got {tok.kind.name} {tok.value!r}",
         )
 
+    def _parse_create_or_index(self) -> Statement:
+        self._expect_keyword("CREATE")
+        nxt = self._peek()
+        if nxt.kind is TokenKind.KEYWORD and nxt.value == "TABLE":
+            return self._parse_create_table()
+        if nxt.kind is TokenKind.KEYWORD and nxt.value == "INDEX":
+            return self._parse_create_index()
+        raise ParseError(
+            nxt.line, nxt.col,
+            f"expected TABLE or INDEX, got {nxt.kind.name} {nxt.value!r}",
+        )
+
+    def _parse_create_index(self) -> Statement:
+        """``CREATE [UNIQUE] INDEX <name> ON <table> (<col>)"""
+        self._expect_keyword("INDEX")
+        unique = False
+        nxt = self._peek()
+        if nxt.kind is TokenKind.KEYWORD and nxt.value == "UNIQUE":
+            self._advance()
+            unique = True
+        name_tok = self._expect_ident()
+        self._expect_keyword("ON")
+        table_tok = self._expect_ident()
+        self._expect_kind(TokenKind.LPAREN)
+        col_tok = self._expect_ident()
+        self._expect_kind(TokenKind.RPAREN)
+        self._match_kind(TokenKind.SEMI)
+        return CreateIndex(
+            name=name_tok.value,
+            table=table_tok.value,
+            columns=(col_tok.value,),
+            unique=unique,
+        )
+
     # --- CREATE TABLE -------------------------------------------------
 
     def _parse_create_table(self) -> CreateTable:
-        self._expect_keyword("CREATE")
         self._expect_keyword("TABLE")
         name_tok = self._expect_ident()
         self._expect_kind(TokenKind.LPAREN)

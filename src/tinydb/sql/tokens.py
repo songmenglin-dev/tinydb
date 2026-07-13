@@ -104,7 +104,7 @@ KEYWORDS: frozenset = frozenset({
     "BOOL", "BOOLEAN", "DATE", "TIME", "DATETIME", "TIMESTAMP",
     "DECIMAL", "NUMERIC", "BLOB", "BYTEA", "JSON",
     # Constraints
-    "PRIMARY", "KEY", "UNIQUE", "DEFAULT", "CHECK",
+    "PRIMARY", "KEY", "UNIQUE", "DEFAULT", "CHECK", "INDEX",
     # Aggregates
     "COUNT", "SUM", "AVG", "MIN", "MAX",
 })

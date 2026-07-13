@@ -126,6 +126,16 @@ class DropTable(Statement):
 
 
 @dataclass(frozen=True, slots=True)
+class CreateIndex(Statement):
+    """``CREATE [UNIQUE] INDEX <name> ON <table> (<col>)``."""
+
+    name: str
+    table: str
+    columns: Tuple[str, ...]
+    unique: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Insert(Statement):
     """``INSERT INTO table [(cols)] VALUES (...)``."""
 
@@ -225,6 +235,7 @@ __all__ = [
     "Assignment",
     "BinaryOp",
     "ColumnRef",
+    "CreateIndex",
     "CreateTable",
     "Delete",
     "DropTable",
