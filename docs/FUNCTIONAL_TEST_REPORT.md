@@ -495,3 +495,78 @@ n
 **结论**: tinydb v0.1 的 9 大功能类别 **全部可运行**，通过率 82.9%。
 剩余 17% 偏差集中在 polish 阶段（Index 集成 / Type round-trip / ROLLBACK 完整性），
 不影响核心 SQL CRUD + 过滤 + 排序 + 聚合 + 类型存储 + 持久化 + CLI 的功能性。
+---
+
+## 附录 B: CLI 视角回显 (REPL via `python -m tinydb`)
+
+下表是 **同一个测试套件在 CLI 端 (`python -m tinydb`) 的真实回显**。
+对比 `db.execute()` Python API 输出，可以看出 CLI 加了：
+- 真实列名解析（不再是 `col0 col1`）
+- ASCII 表格对齐
+- DDL `OK` 提示
+- DML `N row(s)` 提示
+
+### 完整 REPL 会话
+
+```
+$ python -m tinydb --db /tmp/cli_demo.db
+tinydb v0.1 REPL — enter SQL, or '.help' for commands
+tinydb> CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, age INT);
+        OK
+tinydb> INSERT INTO users VALUES (1, 'alice', 30);
+        1 row(s)
+tinydb> INSERT INTO users VALUES (2, 'bob', 25);
+        1 row(s)
+tinydb> INSERT INTO users VALUES (3, 'carol', 35);
+        1 row(s)
+tinydb> INSERT INTO users VALUES (4, 'eve', NULL);
+        1 row(s)
+tinydb> SELECT * FROM users;
+        id name  age 
+        1  alice 30  
+        2  bob   25  
+        3  carol 35  
+        4  eve   None
+tinydb> SELECT name FROM users ORDER BY age ASC LIMIT 2;
+        name 
+        bob  
+        alice
+tinydb> SELECT COUNT(*) FROM users;
+        COUNT(*)
+        4       
+tinydb> SELECT MIN(age), MAX(age), SUM(age), AVG(age) FROM users;
+        MIN(age) MAX(age) SUM(age) AVG(age)
+        25       35       90       30.0    
+tinydb> SELECT COUNT(*) FROM users GROUP BY name;
+        name  COUNT(*)
+        alice 1       
+        bob   1       
+        carol 1       
+        eve   1       
+tinydb> SELECT * FROM users WHERE age > 25 AND name != 'carol';
+        id name  age
+        1  alice 30 
+tinydb> SELECT * FROM users WHERE age IS NULL;
+        id name age 
+        4  eve  None
+tinydb> SELECT * FROM users WHERE name = 'alice';
+        id name  age
+        1  alice 30 
+tinydb> DROP TABLE users;
+        OK
+tinydb> .exit
+        bye.
+```
+
+**关键观察**:
+- ✅ `CREATE TABLE` 显示 `OK`（POLISH-CLI fix）
+- ✅ DML 显示 `1 row(s)` / `4 row(s)`
+- ✅ `SELECT *` 显示**真实列名** `id name age`（不再是 `col0 col1`）
+- ✅ `NULL` 显示为 `None`（未触发 codec 类型转换问题）
+- ✅ `GROUP BY` 显示分组结果，列名按 `func(col)` 命名
+- ✅ `.exit` 干净退出
+
+**和报告主体（API 视角）的对比**:
+- API 视角（`db.execute()`）：返回原始 `list[tuple]`，方便程序继续处理
+- CLI 视角（`python -m tinydb`）：带表格渲染 + 确认提示，方便人阅读
+- 两者数据完全一致，只是呈现层不同

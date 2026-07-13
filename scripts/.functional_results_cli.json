@@ -1,0 +1,62 @@
+[
+  {
+    "sql": "OK",
+    "stdout": ""
+  },
+  {
+    "sql": "1 row(s)",
+    "stdout": ""
+  },
+  {
+    "sql": "1 row(s)",
+    "stdout": ""
+  },
+  {
+    "sql": "1 row(s)",
+    "stdout": ""
+  },
+  {
+    "sql": "1 row(s)",
+    "stdout": ""
+  },
+  {
+    "sql": "id name  age ",
+    "stdout": "1  alice 30  \n2  bob   25  \n3  carol 35  \n4  eve   None"
+  },
+  {
+    "sql": "name ",
+    "stdout": "bob  \nalice"
+  },
+  {
+    "sql": "COUNT(*)",
+    "stdout": "4       "
+  },
+  {
+    "sql": "MIN(age) MAX(age) SUM(age) AVG(age)",
+    "stdout": "25       35       90       30.0    "
+  },
+  {
+    "sql": "name  COUNT(*)",
+    "stdout": "alice 1       \nbob   1       \ncarol 1       \neve   1       "
+  },
+  {
+    "sql": "id name  age",
+    "stdout": "1  alice 30 "
+  },
+  {
+    "sql": "id name age ",
+    "stdout": "4  eve  None"
+  },
+  {
+    "sql": "id name  age",
+    "stdout": "1  alice 30 "
+  },
+  {
+    "sql": "OK",
+    "stdout": ""
+  },
+  {
+    "sql": "bye.",
+    "stdout": ""
+  }
+]
