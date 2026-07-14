@@ -1,62 +1,321 @@
-[
-  {
-    "sql": "OK",
-    "stdout": ""
-  },
-  {
-    "sql": "1 row(s)",
-    "stdout": ""
-  },
-  {
-    "sql": "1 row(s)",
-    "stdout": ""
-  },
-  {
-    "sql": "1 row(s)",
-    "stdout": ""
-  },
-  {
-    "sql": "1 row(s)",
-    "stdout": ""
-  },
-  {
-    "sql": "id name  age ",
-    "stdout": "1  alice 30  \n2  bob   25  \n3  carol 35  \n4  eve   None"
-  },
-  {
-    "sql": "name ",
-    "stdout": "bob  \nalice"
-  },
-  {
-    "sql": "COUNT(*)",
-    "stdout": "4       "
-  },
-  {
-    "sql": "MIN(age) MAX(age) SUM(age) AVG(age)",
-    "stdout": "25       35       90       30.0    "
-  },
-  {
-    "sql": "name  COUNT(*)",
-    "stdout": "alice 1       \nbob   1       \ncarol 1       \neve   1       "
-  },
-  {
-    "sql": "id name  age",
-    "stdout": "1  alice 30 "
-  },
-  {
-    "sql": "id name age ",
-    "stdout": "4  eve  None"
-  },
-  {
-    "sql": "id name  age",
-    "stdout": "1  alice 30 "
-  },
-  {
-    "sql": "OK",
-    "stdout": ""
-  },
-  {
-    "sql": "bye.",
-    "stdout": ""
-  }
-]
+{
+  "DDL": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "tinydb> OK",
+      "output": []
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ],
+  "DML": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "id name  age",
+      "output": [
+        "1  alice 30 ",
+        "2  bob   25 ",
+        "3  carol 35 ",
+        "4  dave  18 "
+      ]
+    },
+    {
+      "sql": "id name  age",
+      "output": [
+        "1  alice 30 ",
+        "3  carol 35 "
+      ]
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "id name  age",
+      "output": [
+        "1  alice 31 "
+      ]
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "id name  age",
+      "output": [
+        "2  bob   25 ",
+        "3  carol 35 ",
+        "1  alice 31 "
+      ]
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ],
+  "Filter": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "id name  age",
+      "output": [
+        "1  alice 30 "
+      ]
+    },
+    {
+      "sql": "id name  age",
+      "output": [
+        "2  bob   25 ",
+        "3  carol 35 "
+      ]
+    },
+    {
+      "sql": "id name age",
+      "output": [
+        "4  eve  None"
+      ]
+    },
+    {
+      "sql": "id name  age",
+      "output": [
+        "1  alice 30 ",
+        "2  bob   25 ",
+        "3  carol 35 "
+      ]
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ],
+  "Ordering": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "name",
+      "output": [
+        "alice",
+        "bob  "
+      ]
+    },
+    {
+      "sql": "name",
+      "output": [
+        "dave ",
+        "carol"
+      ]
+    },
+    {
+      "sql": "name",
+      "output": [
+        "carol"
+      ]
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ],
+  "Aggregate": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "COUNT(*)",
+      "output": [
+        "4       "
+      ]
+    },
+    {
+      "sql": "MIN(age) MAX(age) SUM(age) AVG(age)",
+      "output": [
+        "18       35       108      27.0    "
+      ]
+    },
+    {
+      "sql": "name  COUNT(*)",
+      "output": [
+        "alice 1       ",
+        "bob   1       ",
+        "carol 1       ",
+        "dave  1       "
+      ]
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ],
+  "Index": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "",
+      "output": []
+    }
+  ],
+  "Transactions": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "id  name age",
+      "output": [
+        "200 tx1  1  "
+      ]
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ],
+  "Types": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "1 row(s)",
+      "output": []
+    },
+    {
+      "sql": "a_int a_float a_text a_bool a_date     a_time   a_dt                a_dec      a_blob          a_json",
+      "output": [
+        "42    3.14    hello  True   2024-01-15 13:45:00 2024-01-15 13:45:00 12345.6789 b'\\x00\\x01\\x02' {'k': 1}"
+      ]
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ],
+  "Persistence": [
+    {
+      "sql": "# Session 1 (write) — see write REPL output above; db closed & reopened",
+      "output": [
+        "tinydb> id val   ",
+        "1  first ",
+        "2  second",
+        "tinydb> bye."
+      ]
+    }
+  ],
+  "CLI": [
+    {
+      "sql": "OK",
+      "output": []
+    },
+    {
+      "sql": "3 row(s)",
+      "output": []
+    },
+    {
+      "sql": "n",
+      "output": [
+        "1",
+        "2",
+        "3"
+      ]
+    },
+    {
+      "sql": "bye.",
+      "output": []
+    }
+  ]
+}
