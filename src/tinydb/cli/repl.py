@@ -164,13 +164,13 @@ def run_repl(
     output("tinydb v0.1 REPL — enter SQL, or '.help' for commands")
     while True:
         try:
-            # Flush stdout so the prompt appears immediately when the
-            # REPL is driven via piped stdin (e.g. ``python -m tinydb``
-            # in a subprocess). Without this, output buffering makes
-            # the prompt appear *after* the result rather than before
-            # the next input.
+            # When stdin is a pipe (e.g. ``echo '...' | python -m tinydb``)
+            # ``input()`` suppresses the prompt entirely.  Emit the
+            # prompt explicitly so REPL transcripts always show
+            # ``tinydb>`` before the result lines.
+            sys.stdout.write("tinydb> ")
             sys.stdout.flush()
-            line = input_fn("tinydb> ")
+            line = input_fn("")
         except EOFError:
             return 0
         line = line.strip()
@@ -210,7 +210,12 @@ def run_repl(
             output(f"Error: {exc}")
             continue
         if not rows:
-            continue  # SELECT-with-no-match is silent.
+            # SELECT-with-no-match: print a friendly ``(0 rows)`` so the
+            # REPL transcript shows a clear one-SQL-one-response
+            # pattern (and the next prompt doesn't visually merge with
+            # the previous empty result).
+            output("(0 rows)")
+            continue
         if columns is None:
             # DML affected-count row: print plainly, not as a column table.
             output(f"{rows[0][0]} row(s)")

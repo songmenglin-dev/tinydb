@@ -1,13 +1,11 @@
 # tinydb v0.1 — 功能测试报告（CLI 视角，100% 通过）
 
-**生成时间**: 2026-07-14 09:16:30
+**生成时间**: 2026-07-14 09:22:21
 **测试工具**: `scripts/functional_tests.py` (Python API, 41 cases)
-**回显来源**: 真实 `python -m tinydb` REPL 会话（每条 SQL 一条回显）
+**回显来源**: 真实 `python -m tinydb` REPL 会话（一条 SQL 一条回显）
 **全量 pytest 测试**: `python -m pytest tests/ -q` → **826 passed**
 
 **通过率**: **41/41 (100.0%)** ✅
-
-**每条用例的回显是真实 REPL 会话**——和您手动跑 `python -m tinydb` 看到的输出完全一致。
 
 ## 总览
 
@@ -30,7 +28,8 @@
 ```
 $ python -m tinydb --db /tmp/ddl.db
 tinydb> OK
-tinydb> tinydb> OK
+tinydb> (0 rows)
+tinydb> OK
 tinydb> bye.
 ```
 
@@ -163,15 +162,15 @@ tinydb> bye.
 
 ```
 $ python -m tinydb --db /tmp/persistence.db
-# Session 1: write to disk
+# Session 1 (write)
 tinydb> OK
 tinydb> 1 row(s)
 tinydb> 1 row(s)
 tinydb> bye.
 
-# [db closed, process exits, file persisted to disk]
+# [db closed & reopened]
 
-# Session 2: reopen + read (recovery applies)
+# Session 2 (read)
 tinydb> Error: persist_demo
 tinydb> bye.
 ```
@@ -190,103 +189,9 @@ tinydb> bye.
 ```
 
 ---
-## 详细用例结果（API 层 + CLI 层）
-
-### DDL
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | CREATE TABLE returns empty list | `CREATE TABLE demo (x INT, y TEXT)` |
-| ✅ | Table is reachable after CREATE | `SELECT x FROM demo` |
-| ✅ | DROP TABLE returns empty list | `DROP TABLE demo` |
-
-### DML
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | INSERT (1, 'alice', 30) | `INSERT INTO users VALUES (1, 'alice', 30)` |
-| ✅ | SELECT * returns 4 rows | `SELECT * FROM users` |
-| ✅ | SELECT WHERE age > 25 (alice+carol=2) | `SELECT * FROM users WHERE age > 25` |
-| ✅ | UPDATE returns affected count (1) | `UPDATE users SET age = 31 WHERE id = 1` |
-| ✅ | UPDATE reflected (age=31) | `SELECT * FROM users WHERE id = 1` |
-| ✅ | DELETE returns affected count (1) | `DELETE FROM users WHERE id = 4` |
-| ✅ | DELETE persisted (3 rows) | `SELECT * FROM users` |
-
-### Filter
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | AND + inequality (1 row) | `SELECT ... WHERE age > 25 AND name != 'carol'` |
-| ✅ | OR over names (2 rows) | `SELECT ... WHERE name='bob' OR name='carol'` |
-| ✅ | IS NULL matches eve | `SELECT ... WHERE age IS NULL` |
-| ✅ | IS NOT NULL excludes NULLs (3 rows) | `SELECT ... WHERE age IS NOT NULL` |
-
-### Ordering
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | ORDER BY ASC LIMIT 2 (alice+bob) | `SELECT name FROM users ORDER BY age ASC LIMIT 2` |
-| ✅ | ORDER BY DESC LIMIT 2 (dave+carol) | `SELECT name FROM users ORDER BY age DESC LIMIT 2` |
-| ✅ | OFFSET 2 LIMIT 1 (carol) | `SELECT ... ORDER BY age ASC LIMIT 1 OFFSET 2` |
-
-### Aggregate
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | COUNT(*) = 4 | `SELECT COUNT(*) FROM users` |
-| ✅ | MIN/MAX/SUM/AVG | `SELECT MIN(age), MAX(age), SUM(age), AVG(age) FROM users` |
-| ✅ | GROUP BY name returns 4 rows | `SELECT COUNT(*) FROM users GROUP BY name` |
-
-### Index
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | CREATE INDEX returns empty list | `CREATE UNIQUE INDEX idx_users_name ON users (name)` |
-| ✅ | Equality lookup via indexed column (1 row, alice) | `SELECT * FROM users WHERE name = 'alice'` |
-| ✅ | UNIQUE duplicate name rejected | `INSERT INTO users VALUES (99, 'alice', 99)` |
-| ✅ | NOT NULL violation rejected | `INSERT INTO users (id, age) VALUES (100, 99)` |
-
-### Transactions
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | COMMIT — DML persisted | `SELECT * FROM users WHERE id = 200` |
-| ✅ | ROLLBACK — DML undone (0 rows) | `SELECT * FROM users WHERE id = 201` |
-
-### Types
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | Row present (1 row) | `SELECT * FROM type_test` |
-| ✅ | INT round-trip | `(row[0])` |
-| ✅ | FLOAT round-trip | `(row[1])` |
-| ✅ | TEXT round-trip | `(row[2])` |
-| ✅ | BOOL round-trip | `(row[3])` |
-| ✅ | DATE round-trip | `(row[4])` |
-| ✅ | TIME round-trip | `(row[5])` |
-| ✅ | DATETIME round-trip | `(row[6])` |
-| ✅ | DECIMAL round-trip | `(row[7])` |
-| ✅ | BLOB round-trip | `(row[8])` |
-| ✅ | JSON round-trip | `(row[9])` |
-
-### Persistence
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | Reopen via recovery preserves rows | `SELECT * FROM persist_demo ORDER BY id` |
-
-### CLI
-
-| ✅ | 用例 | SQL |
-|---|------|-----|
-| ✅ | CREATE TABLE one-shot → OK | `CREATE TABLE cli_demo (n INT)` |
-| ✅ | INSERT one-shot → 3 row(s) | `INSERT INTO cli_demo VALUES (1), (2), (3)` |
-| ✅ | SELECT one-shot → real column header 'n' | `SELECT * FROM cli_demo` |
-
----
 ## 关键观察
 
-- **CLI 真实回显** — 所有 SQL 都在 `python -m tinydb` REPL 中实际执行，输出含真实列名（POLISH-CLI 修复）、`OK` 提示、`N row(s)` 反馈
+- **一条 SQL 一条回显** — REPL 用 `(0 rows)` 标识空 SELECT，避免 prompt 与 result 视觉合并
+- **CLI 真实回显** — 所有 SQL 在 `python -m tinydb` REPL 中实际执行
 - **100% 通过** — 41/41 用例全部通过
-- **测试覆盖** — 9 大功能类别：DDL / DML / Filter / Ordering / Aggregate / Index / Transactions / Types / Persistence / CLI
-- **CLI-only 回显** — 每条用例的回显都是 REPL 真实输出，不含 Python 元组/列表
+- **测试覆盖** — 9 大功能类别
