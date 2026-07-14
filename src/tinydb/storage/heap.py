@@ -125,9 +125,19 @@ class Heap:
     fence.
     """
 
-    def __init__(self, pager: Pager, table_id: int = 0) -> None:
+    def __init__(
+        self,
+        pager: Pager,
+        table_id: int = 0,
+        on_page_write=None,
+    ) -> None:
         self._pager = pager
         self._table_id = table_id
+        # Optional callback invoked as ``on_page_write(pid, before, after)``
+        # for every page mutation.  T-6.6 wires this to the WAL through
+        # :meth:`TransactionManager.log_page_write` so writes become
+        # part of the crash-recovery log.  ``None`` disables logging.
+        self._on_page_write = on_page_write
         # Allocate and initialise the first page (header = empty chain head).
         self._head_pid: int = pager.allocate_page()
         page = bytearray(pager.read_page(self._head_pid))
@@ -136,6 +146,22 @@ class Heap:
         # Per-page free-byte tracker (REQ-STO-7).
         self._fsm = FreeSpaceMap()
         self._refresh_fsm(self._head_pid)
+
+    def _write_page_logged(self, pid: int, page: bytearray) -> None:
+        """Write a page to disk, recording a before-image for recovery.
+
+        Used in place of ``self._pager.write_page(pid, bytes(page))``
+        inside the heap so the transaction manager can capture the
+        whole-page before/after pair for the WAL.
+        """
+        # Capture the BEFORE image FIRST, then write, then dispatch —
+        # otherwise ``read_page`` would return the new state.
+        before = self._pager.read_page(pid)
+        data = bytes(page)
+        cb = self._on_page_write
+        if cb is not None:
+            cb(pid, before, data)
+        self._pager.write_page(pid, data)
 
     # -- introspection ---------------------------------------------------
 
@@ -197,7 +223,7 @@ class Heap:
         _write_slot(page, new_slot_id, data_end, record_len, 1)
         # Update the header in place.
         _write_header(page, next_pid, new_slot_count, new_data_end)
-        self._pager.write_page(pid, bytes(page))
+        self._write_page_logged(pid, page)
         self._refresh_fsm(pid)
         return Rid(page_id=pid, slot_id=new_slot_id)
 
@@ -223,7 +249,7 @@ class Heap:
         if rid.slot_id >= slot_count:
             return
         _write_slot(page, rid.slot_id, 0, 0, 0)
-        self._pager.write_page(rid.page_id, bytes(page))
+        self._write_page_logged(rid.page_id, page)
 
     def scan(self) -> Iterator[Rid]:
         """Yield every live Rid in the heap, page-by-page, slot-in-order."""
@@ -254,11 +280,11 @@ class Heap:
         tail_page = bytearray(self._pager.read_page(tail_pid))
         next_pid, slot_count, data_end = _read_header(tail_page)
         _write_header(tail_page, new_pid, slot_count, data_end)
-        self._pager.write_page(tail_pid, bytes(tail_page))
+        self._write_page_logged(tail_pid, tail_page)
         # Initialise the new page as a fresh chain tail.
         new_page = bytearray(self._pager.read_page(new_pid))
         _write_header(new_page, NO_NEXT, 0, DATA_START)
-        self._pager.write_page(new_pid, bytes(new_page))
+        self._write_page_logged(new_pid, new_page)
         return new_pid
 
 

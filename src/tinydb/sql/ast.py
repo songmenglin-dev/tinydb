@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-from tinydb.types.system import Column
+from tinydb.types.system import Column, TypeTag
 
 
 # --- marker base classes ------------------------------------------------
@@ -126,6 +126,16 @@ class DropTable(Statement):
 
 
 @dataclass(frozen=True, slots=True)
+class CreateIndex(Statement):
+    """``CREATE [UNIQUE] INDEX <name> ON <table> (<col>)``."""
+
+    name: str
+    table: str
+    columns: Tuple[str, ...]
+    unique: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class Insert(Statement):
     """``INSERT INTO table [(cols)] VALUES (...)``."""
 
@@ -205,11 +215,27 @@ class UnaryOp(Expr):
     operand: "Expr"
 
 
+@dataclass(frozen=True, slots=True)
+class TypedLiteral(Expr):
+    """A type-prefixed literal — ``DATE '2026-07-09'``, ``DECIMAL '0.10'``.
+
+    Covers REQ-TYP-9..14.  ``tag`` is the declared target TypeTag (so
+    the executor can validate the column type); ``value`` is the parsed
+    Python native (``datetime.date`` / ``datetime.time`` /
+    ``datetime.datetime`` / ``decimal.Decimal`` / ``bytes`` / ``(dict |
+    list | scalar)``).
+    """
+
+    tag: TypeTag
+    value: Any
+
+
 __all__ = [
     "Aggregate",
     "Assignment",
     "BinaryOp",
     "ColumnRef",
+    "CreateIndex",
     "CreateTable",
     "Delete",
     "DropTable",
@@ -222,6 +248,7 @@ __all__ = [
     "Select",
     "Star",
     "Statement",
+    "TypedLiteral",
     "UnaryOp",
     "Update",
 ]

@@ -26,7 +26,9 @@ import datetime
 import json
 import struct
 from decimal import Decimal
-from typing import Any
+from typing import Any, Sequence
+
+from tinydb.types.system import TypeTag
 
 from tinydb.types.system import TypeTag
 
@@ -224,4 +226,95 @@ def _check_int_range(value: int) -> None:
         raise OverflowError(f"int {value} does not fit in signed 64-bit")
 
 
-__all__ = ["encode_value", "decode_value", "value_size"]
+def encode_row(values: Sequence[Any], tags: Sequence[TypeTag]) -> bytes:
+    """Pack a row as a sequence of length-prefixed values.
+
+    Each value is encoded with ``encode_value(value, tags[i])``. Used by
+    the executor when a Heap stores a tuple of column-major encoded
+    blobs (REQ-QEX-1).
+    """
+    if len(values) != len(tags):
+        raise ValueError(
+            f"encode_row: {len(values)} values vs {len(tags)} tags"
+        )
+    out = bytearray()
+    for v, t in zip(values, tags):
+        out += encode_value(v, t)
+    return bytes(out)
+
+
+def decode_row(blob: bytes, tags: Sequence[TypeTag]) -> tuple:
+    """Reverse of :func:`encode_row` — returns a tuple of Python values.
+
+    Raises if ``blob`` ends mid-value (defensive: Heap should not produce
+    truncated records, but we want a clear error if it does).
+    """
+    out: list = []
+    offset = 0
+    for t in tags:
+        v, offset = decode_value(blob, offset)
+        out.append(v)
+    if offset != len(blob):
+        raise ValueError(
+            f"decode_row: {len(blob) - offset} trailing bytes "
+            f"(expected exactly {len(blob)} consumed)"
+        )
+    return tuple(out)
+
+
+def encode_row_coerced(
+    values: Sequence[Any], tags: Sequence[TypeTag]
+) -> bytes:
+    """Encode a row by coercing each value to its column's declared tag.
+
+    Used by the executor when writing a row from INSERT or UPDATE: the
+    parser hands us raw Python values (already unwrapped from
+    ``Literal``), and we apply the per-column coercion rules so
+    numeric widening (int → FLOAT), JSON validation, etc. all land in
+    the right bytes before they hit the heap.
+
+    NULL special-case: a Python ``None`` into any nullable column is
+    encoded as a single ``TypeTag.Null`` byte on disk.  This keeps the
+    on-disk representation compact (NULL columns are not the common
+    case in v0.1) and lets SELECT decode it back to ``None`` uniformly
+    via :func:`decode_value`.  ``coerce_value`` rejects ``None`` for
+    any non-JSON/Null tag, so the NULL case is handled here before
+    delegating.
+
+    Length of ``values`` and ``tags`` must match; raises
+    :class:`ValueError` otherwise (mirrors :func:`encode_row`).
+    """
+    # Local import: tinydb.types.coerce imports encode_value from this
+    # module, so a top-level import would form a cycle.
+    from tinydb.types.coerce import coerce_value
+
+    if len(values) != len(tags):
+        raise ValueError(
+            f"encode_row_coerced: {len(values)} values vs {len(tags)} tags"
+        )
+    out = bytearray()
+    for v, t in zip(values, tags):
+        # TypedLiteral unwrap (T-7.2): the parser preserves
+        # ``DATE '...'`` / ``DECIMAL '...'`` as TypedLiteral AST nodes in
+        # the INSERT VALUES list so the executor can dispatch on the
+        # declared target tag.  Unwrap here so the downstream coerce
+        # path sees a plain Python value.
+        v = getattr(v, "value", v)
+        if v is None:
+            # TypeTag.Null covers SQL NULL — 1 byte.  The decoder
+            # matches this and returns ``None`` back to the caller.
+            out += encode_value(None, TypeTag.Null)
+            continue
+        blob, _actual_tag = coerce_value(v, t)
+        out += blob
+    return bytes(out)
+
+
+__all__ = [
+    "encode_value",
+    "decode_value",
+    "value_size",
+    "encode_row",
+    "decode_row",
+    "encode_row_coerced",
+]
