@@ -7,25 +7,25 @@
 
 ---
 
-## 总览
+## 一、总览
 
 | 类别 | 通过率 | 用例数 | 状态 |
 |------|--------|--------|------|
-| DDL | 100% (3/3) | 3 | ✅ |
-| DML | 100% (7/7) | 7 | ✅ |
-| Filter | 100% (4/4) | 4 | ✅ |
-| Ordering | 100% (3/3) | 3 | ✅ |
-| Aggregate | 100% (3/3) | 3 | ✅ |
-| Index | 100% (4/4) | 4 | ✅ |
-| Transactions | 100% (2/2) | 2 | ✅ |
-| Types | 100% (11/11) | 11 | ✅ |
-| Persistence | 100% (1/1) | 1 | ✅ |
-| CLI | 100% (3/3) | 3 | ✅ |
+| DDL（数据定义） | 100% (3/3) | 3 | ✅ |
+| DML（数据操作） | 100% (7/7) | 7 | ✅ |
+| Filter（过滤） | 100% (4/4) | 4 | ✅ |
+| Ordering（排序） | 100% (3/3) | 3 | ✅ |
+| Aggregate（聚合） | 100% (3/3) | 3 | ✅ |
+| Index（索引） | 100% (4/4) | 4 | ✅ |
+| Transactions（事务） | 100% (2/2) | 2 | ✅ |
+| Types（类型系统） | 100% (11/11) | 11 | ✅ |
+| Persistence（持久化） | 100% (1/1) | 1 | ✅ |
+| CLI（命令行） | 100% (3/3) | 3 | ✅ |
 | **总计** | **100% (41/41)** | **41** | ✅ |
 
 ---
 
-## DDL — CREATE / DROP TABLE
+## 二、DDL — CREATE / DROP TABLE（建表 / 删表）
 
 ```
 $ python -m tinydb --db test.db
@@ -42,7 +42,7 @@ bye.
 
 ---
 
-## DML — INSERT / SELECT / UPDATE / DELETE
+## 三、DML — INSERT / SELECT / UPDATE / DELETE（增 / 查 / 改 / 删）
 
 ```
 $ python -m tinydb --db test.db
@@ -85,7 +85,7 @@ bye.
 
 ---
 
-## Filter — WHERE / AND / OR / IS NULL
+## 四、Filter — WHERE / AND / OR / IS NULL（条件过滤）
 
 ```
 $ python -m tinydb --db test.db
@@ -121,7 +121,7 @@ bye.
 
 ---
 
-## Ordering — ORDER BY / LIMIT / OFFSET
+## 五、Ordering — ORDER BY / LIMIT / OFFSET（排序 / 分页）
 
 ```
 $ python -m tinydb --db test.db
@@ -153,7 +153,7 @@ bye.
 
 ---
 
-## Aggregate — COUNT / SUM / AVG / MIN / MAX / GROUP BY
+## 六、Aggregate — COUNT / SUM / AVG / MIN / MAX / GROUP BY（聚合函数）
 
 ```
 $ python -m tinydb --db test.db
@@ -186,7 +186,7 @@ bye.
 
 ---
 
-## Index — B-tree Index + UNIQUE
+## 七、Index — B-tree Index + UNIQUE 约束（B 树索引 / 唯一约束）
 
 ```
 $ python -m tinydb --db test.db
@@ -212,7 +212,7 @@ bye.
 
 ---
 
-## Transactions — COMMIT (autocommit)
+## 八、Transactions — 事务（autocommit 模式）
 
 ```
 $ python -m tinydb --db test.db
@@ -230,11 +230,11 @@ tinydb> .exit
 bye.
 ```
 
-> 说明: `db.execute()` 层支持完整 BEGIN/COMMIT/ROLLBACK 事务（见 `scripts/functional_tests.py` 的 Transactions 类别 100% 通过）；REPL 单条 SQL 路径走 autocommit。事务由 `with db.transaction():` 块 API 触发，不是 REPL 内联 SQL。
+> **说明**：在 `db.execute()` API 层，`tinydb` 支持完整 BEGIN / COMMIT / ROLLBACK 事务（见 `scripts/functional_tests.py` 的 Transactions 类别 100% 通过）。REPL 单条 SQL 路径走 autocommit 模式——事务由 `with db.transaction():` 块 API 触发，不是 REPL 内联 SQL。
 
 ---
 
-## Types — 10 种类型 round-trip
+## 九、Types — 10 种类型 round-trip（类型系统）
 
 ```
 $ python -m tinydb --db test.db
@@ -252,7 +252,7 @@ bye.
 
 ---
 
-## CLI — `-c` 一次性模式
+## 十、CLI — `-c` 一次性命令行模式
 
 ```
 $ python -m tinydb --db test.db -c "create table cli_demo (n int); insert into cli_demo values (1), (2), (3); select * from cli_demo"
@@ -266,7 +266,7 @@ n
 
 ---
 
-## Persistence — 关闭 + 重开 + 恢复
+## 十一、Persistence — 关闭 + 重开 + 恢复（持久化）
 
 ```
 $ python -m tinydb --db test.db
@@ -280,7 +280,7 @@ tinydb> insert into persist_demo values (2, 'second');
 tinydb> .exit
 bye.
 
-# --- db closed, file persisted to disk, process exits ---
+# --- 数据库文件已关闭并落盘 ---
 
 $ python -m tinydb --db test.db
 tinydb v0.1 REPL — enter SQL, or '.help' for commands
@@ -294,11 +294,11 @@ bye.
 
 ---
 
-## 关键观察
+## 十二、关键观察
 
 - **每条 SQL 一条回显** — REPL 用 `tinydb> <SQL>` 提示 + 响应表 + `(0 rows)` 标识空 SELECT
 - **CLI 真实回显** — 所有 SQL 在 `python -m tinydb` REPL 中实际执行
 - **100% 通过** — 41/41 用例全部通过
-- **测试覆盖** — 9 大功能类别 + CLI one-shot 模式 + Persistence 持久化
-- **真实列名** — `SELECT *` 显示真实列名（POLISH-CLI 修复），不再是 `col0`/`col1`
+- **测试覆盖** — 9 大功能类别 + CLI 一次性模式 + 持久化场景
+- **真实列名** — `SELECT *` 显示真实列名（POLISH-CLI 修复后），不再是 `col0`/`col1`
 - **NULL 显示** — 空值显示为 `None`（Python 风格）
