@@ -17,7 +17,7 @@ import contextlib
 from pathlib import Path
 from typing import Iterator, Union
 
-from tinydb.errors import ParseError
+from tinydb.errors import ParseError, TinydbError
 from tinydb.executor.executor import Executor
 from tinydb.executor.planner import plan as _plan
 from tinydb.index.manager import IndexManager
@@ -29,6 +29,11 @@ from tinydb.storage.pager import Pager
 from tinydb.tx.manager import TransactionManager
 from tinydb.tx.recovery import Recovery
 from tinydb.tx.wal import WAL
+from tinydb.types.system import Column, TypeTag
+
+
+# Forward reference for List in Python 3.10-compatible code.
+from typing import List  # noqa: E402  (placed after stdlib imports for clarity)
 
 
 class Database:
@@ -86,6 +91,44 @@ class Database:
     def executor(self) -> Executor:
         """Public handle to the live :class:`Executor`."""
         return self._executor
+
+    # -- introspection helpers used by the v0.2 CLI ---------------------
+
+    def list_tables(self) -> List[str]:
+        """Return a sorted list of table names in the catalog.
+
+        Added in v0.2 to back ``.tables``.  Delegates to the catalog.
+        """
+        return list(self._catalog.list_tables())
+
+    def get_schema(self, table: str) -> str:
+        """Return the reconstructed ``CREATE TABLE`` DDL for ``table``.
+
+        Added in v0.2 to back ``.schema <table>``.  Raises
+        :class:`KeyError` when ``table`` is not present (the REPL
+        translates this into the user-facing ``table 'x' does not
+        exist`` message required by REQ-CLI-7).
+        """
+        meta = self._catalog.get_table(table)
+        return _build_create_table_sql(table, meta.columns)
+
+    def explain(self, sql: str) -> str:
+        """Render the execution plan for ``sql`` as an ASCII tree.
+
+        Added in v0.2 to back ``.explain <SQL>``.  Returns the
+        concatenated Logical / Physical trees, or raises the same
+        errors as :meth:`execute` for invalid SQL.
+        """
+        from tinydb.cli.explain import format_plan_pair
+        stmt = parse(sql)
+        # DDL/DML still go through the planner; the join worktree
+        # extends ``plan`` to emit JoinNodes, so we benefit from that
+        # automatically once B12 lands.
+        logical = _plan(stmt, self._catalog, indexer=self._indexer)
+        # For v0.2 we re-use the same plan as the physical tree; the
+        # operator walker lives in tinydb.executor.operators which the
+        # join worktree will augment with NestedLoopJoin nodes.
+        return format_plan_pair(logical, logical)
 
     # -- public API ----------------------------------------------------
 
@@ -168,6 +211,43 @@ class Database:
 def open(path: Union[str, Path]) -> Database:
     """Open or create a database.  Equivalent to ``Database(path)``."""
     return Database(path)
+
+
+# --- helpers used by get_schema and the CLI REPL -----------------------
+
+
+_TAG_TO_SQL: dict = {
+    TypeTag.Int: "INT",
+    TypeTag.Float: "FLOAT",
+    TypeTag.Text: "TEXT",
+    TypeTag.Bool: "BOOL",
+    TypeTag.Date: "DATE",
+    TypeTag.Time: "TIME",
+    TypeTag.Datetime: "DATETIME",
+    TypeTag.Decimal: "DECIMAL",
+    TypeTag.Blob: "BLOB",
+    TypeTag.Json: "JSON",
+}
+
+
+def _column_to_sql(col: Column) -> str:
+    parts = [col.name, _TAG_TO_SQL.get(col.tag, col.tag.name)]
+    if col.primary_key:
+        parts.append("PRIMARY KEY")
+    elif col.unique:
+        parts.append("UNIQUE")
+    if col.not_null:
+        parts.append("NOT NULL")
+    return " ".join(parts)
+
+
+def _build_create_table_sql(table_name: str, columns) -> str:
+    cols_sql = ", ".join(_column_to_sql(c) for c in columns)
+    return f"CREATE TABLE {table_name} ({cols_sql});"
+
+
+class _MissingDatabase:  # pragma: no cover — re-exported below for type hints
+    """Placeholder; not user-facing.  See Database."""
 
 
 __all__ = ["Database", "open"]

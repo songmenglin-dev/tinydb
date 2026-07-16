@@ -27,6 +27,7 @@ classifiers = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "pytest-cov>=4.0"]
+cli = ["prompt_toolkit>=3.0.40"]
 
 [project.scripts]
 tinydb = "tinydb.cli.__main__:main"
