@@ -10,6 +10,19 @@ from __future__ import annotations
 import pytest
 
 from tinydb.errors import ParseError, TinydbError
+from tinydb.executor.logical import (
+    AliasMap,
+    AmbiguousColumnError,
+    BareColumnNotAliasedError,
+    JoinNode,
+    LogicalPlan,
+    TableRef_,
+    UnknownAliasError,
+    build_alias_map,
+    emit_logical,
+    rewrite_using,
+    validate_columns,
+)
 from tinydb.sql.ast import (
     BinaryOp,
     ColumnRef,
@@ -221,3 +234,233 @@ class TestAmbiguousColumnError:
         stmt = parse_dml_string(sql)
         assert isinstance(stmt, Select)
         assert isinstance(stmt.from_, Join)
+
+
+# --- Batch 11: LogicalPlanner / JoinNode / USING / aliases -------------
+
+
+class TestAliasMap:
+    """T-11.1 — building alias → table maps from TableRef trees."""
+
+    def test_single_table_aliased(self) -> None:
+        m = build_alias_map(Table(name="users", alias="u"))
+        assert m.has("u")
+        assert m.canonical("u") == "users"
+
+    def test_single_table_no_alias(self) -> None:
+        m = build_alias_map(Table(name="users"))
+        assert m.has("users")
+        assert m.canonical("users") == "users"
+
+    def test_two_tables_each_aliased(self) -> None:
+        j = Join(
+            left=Table(name="users", alias="u"),
+            right=Table(name="orders", alias="o"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+        )
+        m = build_alias_map(j)
+        assert m.has("u")
+        assert m.has("o")
+        assert m.canonical("u") == "users"
+        assert m.canonical("o") == "orders"
+
+    def test_three_tables_each_aliased(self) -> None:
+        j = Join(
+            left=Join(
+                left=Table(name="a", alias="a_"),
+                right=Table(name="b", alias="b_"),
+                kind=JoinKind.INNER,
+                on_expr=None,
+            ),
+            right=Table(name="c", alias="c_"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+        )
+        m = build_alias_map(j)
+        assert m.canonical("a_") == "a"
+        assert m.canonical("b_") == "b"
+        assert m.canonical("c_") == "c"
+
+
+class TestRewriteUsing:
+    """T-11.3 — USING (col) → AND chain of equality predicates."""
+
+    def test_single_column_using_with_aliases(self) -> None:
+        j = Join(
+            left=Table(name="users", alias="u"),
+            right=Table(name="orders", alias="o"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+            using=("user_id",),
+        )
+        r = rewrite_using(j)
+        # on_expr becomes u.user_id = o.user_id
+        assert isinstance(r.on_expr, BinaryOp)
+        assert r.on_expr.op == "="
+        assert isinstance(r.on_expr.left, ColumnRef)
+        assert r.on_expr.left.table == "u"
+        assert r.on_expr.left.name == "user_id"
+        assert isinstance(r.on_expr.right, ColumnRef)
+        assert r.on_expr.right.table == "o"
+        assert r.on_expr.right.name == "user_id"
+        # using cols preserved for projection dedup
+        assert r.using == ("user_id",)
+
+    def test_multi_column_using_yields_and_chain(self) -> None:
+        j = Join(
+            left=Table(name="t1", alias="a"),
+            right=Table(name="t2", alias="b"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+            using=("x", "y"),
+        )
+        r = rewrite_using(j)
+        # Top-level op is AND; leaves are = comparisons.
+        assert isinstance(r.on_expr, BinaryOp)
+        assert r.on_expr.op == "AND"
+        left_cmp = r.on_expr.left
+        right_cmp = r.on_expr.right
+        assert isinstance(left_cmp, BinaryOp) and left_cmp.op == "="
+        assert isinstance(right_cmp, BinaryOp) and right_cmp.op == "="
+        assert left_cmp.left.name == "x"
+        assert right_cmp.left.name == "y"
+
+    def test_using_no_op_when_already_have_on(self) -> None:
+        cond = BinaryOp("=", ColumnRef("a", "u"), ColumnRef("a", "o"))
+        j = Join(
+            left=Table(name="users", alias="u"),
+            right=Table(name="orders", alias="o"),
+            kind=JoinKind.INNER,
+            on_expr=cond,
+        )
+        r = rewrite_using(j)
+        # Same Join returned (no rewrite needed)
+        assert r is j
+
+
+class TestEmitLogical:
+    """T-11.2 — emit_logical produces LogicalPlan tree."""
+
+    def test_single_table_emits_tableref(self) -> None:
+        stmt = parse("SELECT * FROM users")
+        plan = emit_logical(stmt)
+        assert isinstance(plan, TableRef_)
+        assert plan.table == "users"
+
+    def test_inner_join_emits_join_node(self) -> None:
+        stmt = parse(
+            "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id"
+        )
+        plan = emit_logical(stmt)
+        assert isinstance(plan, JoinNode)
+        assert plan.kind == JoinKind.INNER
+        assert isinstance(plan.left, TableRef_)
+        assert plan.left.alias == "u"
+        assert isinstance(plan.right, TableRef_)
+        assert plan.right.alias == "o"
+        # on_expr passes through
+        assert isinstance(plan.on_expr, BinaryOp)
+        assert plan.on_expr.op == "="
+
+    def test_left_join_emits_join_node_with_nullable(self) -> None:
+        stmt = parse(
+            "SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id"
+        )
+        plan = emit_logical(stmt)
+        assert isinstance(plan, JoinNode)
+        assert plan.kind == JoinKind.LEFT
+        assert plan.nullable_right is True
+
+    def test_using_clause_rewritten_to_and(self) -> None:
+        stmt = parse("SELECT * FROM users JOIN orders USING (user_id)")
+        plan = emit_logical(stmt)
+        assert isinstance(plan, JoinNode)
+        assert plan.using_cols == ("user_id",)
+        # on_expr is the rewritten equality
+        assert isinstance(plan.on_expr, BinaryOp)
+        assert plan.on_expr.op == "="
+
+    def test_three_table_join_nested(self) -> None:
+        stmt = parse(
+            "SELECT * FROM a JOIN b ON a.id=b.aid JOIN c ON b.id=c.bid"
+        )
+        plan = emit_logical(stmt)
+        assert isinstance(plan, JoinNode)
+        assert isinstance(plan.left, JoinNode)
+        assert isinstance(plan.right, TableRef_)
+        assert plan.right.table == "c"
+
+
+class TestValidateColumns:
+    """T-11.4 — alias / ambiguous / bare-name errors."""
+
+    def test_qualified_col_resolves_to_alias(self) -> None:
+        j = Join(
+            left=Table(name="users", alias="u"),
+            right=Table(name="orders", alias="o"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+        )
+        # u.id is fine.
+        validate_columns(
+            BinaryOp("=", ColumnRef("id", "u"), ColumnRef("user_id", "o")),
+            build_alias_map(j),
+            j,
+        )
+
+    def test_unknown_alias_raises(self) -> None:
+        j = Join(
+            left=Table(name="users", alias="u"),
+            right=Table(name="orders", alias="o"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+        )
+        with pytest.raises(UnknownAliasError):
+            validate_columns(
+                ColumnRef("id", "x"),  # x is not an alias
+                build_alias_map(j),
+                j,
+            )
+
+    def test_bare_table_name_rejected_when_aliased(self) -> None:
+        j = Join(
+            left=Table(name="users", alias="u"),
+            right=Table(name="orders", alias="o"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+        )
+        with pytest.raises(BareColumnNotAliasedError):
+            validate_columns(
+                ColumnRef("id", "users"),  # 'users' is aliased to 'u'
+                build_alias_map(j),
+                j,
+            )
+
+    def test_ambiguous_bare_column_raises_in_join(self) -> None:
+        # Two tables, both could plausibly have 'name' column — bare
+        # reference is ambiguous.
+        j = Join(
+            left=Table(name="users", alias="u"),
+            right=Table(name="orders", alias="o"),
+            kind=JoinKind.INNER,
+            on_expr=None,
+        )
+        with pytest.raises(AmbiguousColumnError):
+            validate_columns(
+                ColumnRef("name"),  # bare, ambiguous
+                build_alias_map(j),
+                j,
+            )
+
+
+class TestLogicalSelectIntegration:
+    """End-to-end: parse + emit_logical."""
+
+    def test_basic_inner_join_emits_logical(self) -> None:
+        stmt = parse(
+            "SELECT u.name FROM users u INNER JOIN orders o "
+            "ON u.id = o.user_id WHERE o.total > 100"
+        )
+        plan = emit_logical(stmt)
+        assert isinstance(plan, JoinNode)
