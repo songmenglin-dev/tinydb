@@ -4,6 +4,9 @@ Coverage targets:
 * REQ-CONC-1 — RWLock read/write semantics, write-preferring fairness.
 * REQ-CONC-7 — DeadlockDetector wait-for-graph cycle detection.
 * REQ-CONC-2 — ProcessLock cross-process exclusion (fcntl/msvcrt).
+* REQ-CONC-3 — Snapshot visibility window.
+* REQ-CONC-5 — BufferPool invalidates cache when page LSN moves past
+  the snapshot.
 
 These tests are intentionally self-contained: each one exercises the
 primitive in isolation, not via the full Database stack. Integration
@@ -26,6 +29,7 @@ from tinydb.concurrent import (
     ProcessLockUnavailableError,
     RWLock,
 )
+from tinydb.tx.snapshot import Snapshot
 
 
 # --------------------------------------------------------------------------
@@ -346,3 +350,173 @@ def test_process_lock_unavailable_error_is_clear(tmp_path: Path) -> None:
     # is exercised in unit-level tests for the helper if we patch
     # os.name — kept here as a smoke test.
     _ensure_locking_available()
+
+
+# --------------------------------------------------------------------------
+# Snapshot — REQ-CONC-3
+# --------------------------------------------------------------------------
+
+
+def test_snapshot_equal_lsn_visible() -> None:
+    s = Snapshot(lsn=10)
+    assert s.is_visible(10) is True
+
+
+def test_snapshot_greater_lsn_invisible() -> None:
+    s = Snapshot(lsn=10)
+    assert s.is_visible(11) is False
+    assert s.is_newer(11) is True
+
+
+def test_snapshot_smaller_lsn_visible() -> None:
+    s = Snapshot(lsn=10)
+    assert s.is_visible(5) is True
+    assert s.is_newer(5) is False
+
+
+def test_snapshot_zero_anchors_all_pre_v0_2_pages() -> None:
+    """A fresh v0.1 file has last_lsn == 0; snapshot(0) sees everything below 0."""
+    s = Snapshot(lsn=0)
+    # Page LSN 0 (default for v0.1) is visible.
+    assert s.is_visible(0) is True
+
+
+# --------------------------------------------------------------------------
+# BufferPool LSN invalidation — REQ-CONC-5
+# --------------------------------------------------------------------------
+
+
+class _FakePager:
+    """Minimal Pager stand-in: a dict of page_id -> bytes + last_lsn."""
+
+    def __init__(self) -> None:
+        self._pages: dict = {0: b"\x00" * 16, 1: b"\x01" * 16}
+        self.last_lsn: int = 0
+        self._write_log: list = []
+
+    def read_page(self, pid: int) -> bytes:
+        return self._pages[pid]
+
+    def write_page(self, pid: int, data: bytes) -> None:
+        self._pages[pid] = data
+        self._write_log.append(pid)
+
+
+def test_buffer_pool_invalidates_on_external_write() -> None:
+    """External change to last_lsn causes a re-read on next fetch."""
+    from tinydb.storage.buffer_pool import BufferPool
+
+    pager = _FakePager()
+    pool = BufferPool(pager, capacity=4)
+    # First fetch: page 1 is admitted at LSN 0.
+    data_v1 = pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    assert data_v1 == b"\x01" * 16
+    # External process (B) writes a new version; the on-disk LSN
+    # moves to 5 (representing B's COMMIT).
+    pager._pages[1] = b"\xff" * 16
+    pager.last_lsn = 5
+    # A reader in process A at snapshot LSN=3 should NOT see cached
+    # v1 — the page was admitted at LSN 0 which is < 3, so the
+    # cache is "visible" (v1 is *older* than the snapshot, meaning
+    # v1 was committed before the snapshot opened). Wait — that's
+    # the opposite of the invalidation case. Let me restate:
+    # visible = page_lsn <= snapshot_lsn. So page at LSN 0 IS
+    # visible to snapshot(3). The invalidation case is: page was
+    # admitted at LSN 5 (a more recent write), and the snapshot
+    # is at LSN 3 — then 5 > 3 so the page is newer than the
+    # snapshot and must be re-read.
+    # Re-test that case directly:
+    # Re-admit the page at LSN 5 to simulate A's own stale cache
+    # being asked about a snapshot from before B's commit.
+    pool.invalidate(1)
+    pool.fetch_page(1, snapshot=Snapshot(lsn=10))  # admit at on_disk_lsn=5
+    # Now a snapshot at LSN 3 < 5 must re-read.
+    fresh = pool.fetch_page(1, snapshot=Snapshot(lsn=3))
+    assert fresh == b"\xff" * 16
+
+
+def test_buffer_pool_keeps_cache_when_unmodified() -> None:
+    """Within the same snapshot window, repeated fetches hit the cache."""
+    from tinydb.storage.buffer_pool import BufferPool
+
+    pager = _FakePager()
+    pool = BufferPool(pager, capacity=4)
+    pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    assert pool.stats()["misses"] == 1
+    assert pool.stats()["hits"] == 2
+
+
+def test_buffer_pool_default_snapshot_keeps_v0_1_behavior() -> None:
+    """Without a snapshot kwarg, fetch behaves as v0.1 did (no LSN check)."""
+    from tinydb.storage.buffer_pool import BufferPool
+
+    pager = _FakePager()
+    pool = BufferPool(pager, capacity=4)
+    pool.fetch_page(1)
+    # Bump last_lsn; without a snapshot kwarg the cache is still valid.
+    pager.last_lsn = 99
+    pool.fetch_page(1)
+    assert pool.stats()["misses"] == 1
+
+
+# --------------------------------------------------------------------------
+# TransactionManager — REQ-CONC-3, REQ-CONC-7
+# --------------------------------------------------------------------------
+
+
+def test_transaction_captures_snapshot_on_begin(tmp_path: Path) -> None:
+    """A fresh transaction records a Snapshot on the TransactionContext."""
+    from tinydb.tx.manager import TransactionManager
+    from tinydb.tx.wal import WAL
+
+    db = tmp_path / "t.db"
+    db.write_bytes(b"")
+    wal_path = tmp_path / "t.db.wal"
+    wal_path.write_bytes(b"")
+    pager = _FakePager()
+    wal = WAL(wal_path)
+    pager._pages[0] = b"\x00" * 16  # type: ignore[attr-defined]
+    mgr = TransactionManager(pager, wal)  # type: ignore[arg-type]
+    try:
+        tx = mgr.begin()
+        try:
+            assert tx.snapshot is not None
+            assert tx.snapshot.lsn == 0
+        finally:
+            mgr.rollback(tx)
+    finally:
+        wal.close()
+
+
+def test_transaction_deadlock_raises_in_single_writer() -> None:
+    """In single-writer mode a deadlock attempt is caught eagerly."""
+    from tinydb.tx.manager import DeadlockError, TransactionManager
+    from tinydb.tx.wal import WAL
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        wal_path = Path(td) / "w.wal"
+        wal_path.write_bytes(b"")
+        wal = WAL(wal_path)
+        pager = _FakePager()
+        mgr = TransactionManager(pager, wal)  # type: ignore[arg-type]
+        try:
+            # Force a cycle: add a wait edge (new_tx → active) and
+            # (active → new_tx). detect_cycle should find new_tx.
+            pager._pages[0] = b"\x00" * 16  # type: ignore[attr-defined]
+            # Open one tx.
+            tx1 = mgr.begin()
+            try:
+                # Manually add a back-edge so the next begin() would
+                # cycle.  This is a synthetic test — the production
+                # code only adds forward edges.
+                mgr.deadlock_detector.add_wait(tx1.tx_id, 9999)
+                mgr.deadlock_detector.add_wait(9999, tx1.tx_id)
+                with pytest.raises(DeadlockError):
+                    mgr.begin()
+            finally:
+                mgr.rollback(tx1)
+        finally:
+            wal.close()

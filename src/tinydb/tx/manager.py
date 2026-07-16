@@ -45,6 +45,7 @@ from typing import Iterator, Optional
 from tinydb.concurrent.deadlock import DeadlockDetector
 from tinydb.errors import TinydbError
 from tinydb.tx.lock import WriteLock, WriteLockHeld
+from tinydb.tx.snapshot import Snapshot
 from tinydb.tx.wal import RT_BEGIN, RT_COMMIT, RT_PAGE, RT_ROLLBACK, WAL
 
 
@@ -58,6 +59,10 @@ class TransactionContext:
         Monotonically increasing id assigned at BEGIN.
     begin_lsn:
         LSN of the RT_BEGIN record in the WAL.
+    snapshot:
+        :class:`Snapshot` capturing the visibility window for this
+        transaction (REQ-CONC-3).  Pages whose ``last_lsn`` exceeds
+        ``snapshot.lsn`` are re-read from disk.
     manager:
         The owning :class:`TransactionManager`; passed back into
         ``commit`` / ``rollback`` so the manager can verify the
@@ -66,6 +71,7 @@ class TransactionContext:
 
     tx_id: int
     begin_lsn: int
+    snapshot: Snapshot
     manager: "TransactionManager"
 
 
@@ -155,6 +161,17 @@ class TransactionManager:
         else:
             self.commit(tx)
 
+    def _acquire_snapshot(self) -> Snapshot:
+        """Return a snapshot anchored at the current on-disk LSN.
+
+        Uses the Pager's last_lsn — i.e. the highest LSN whose effects
+        are durably on disk before this transaction's BEGIN record
+        is appended.  This is the v0.2 READ COMMITTED semantics: a
+        reader sees everything committed up to *before* it started.
+        """
+        on_disk_lsn = getattr(self._pager, "last_lsn", 0) or 0
+        return Snapshot(lsn=on_disk_lsn)
+
     def begin(self) -> TransactionContext:
         """Acquire the write lock, append RT_BEGIN, return the context.
 
@@ -197,8 +214,14 @@ class TransactionManager:
             )
         tx_id = self._next_tx_id
         self._next_tx_id += 1
+        # Capture snapshot BEFORE we append BEGIN so our own BEGIN
+        # record is not visible to ourselves (strict read-your-own-
+        # writes would require appending BEGIN first, but the v0.1
+        # contract is that the snapshot is anchored at the last
+        # committed state, not at our own BEGIN).
+        snapshot = self._acquire_snapshot()
         begin_lsn = self._wal.append(RT_BEGIN, _encode_tx_id(tx_id))
-        self._active_tx = TransactionContext(tx_id, begin_lsn, self)
+        self._active_tx = TransactionContext(tx_id, begin_lsn, snapshot, self)
         self._held = held
         self._logged_pages = []
         return self._active_tx

@@ -5,6 +5,9 @@ REQ coverage:
   the same page hits the cache without disk I/O.
 * REQ-STO-8 — :meth:`flush_all` writes every dirty cached page through to
   the underlying Pager (transaction COMMIT path).
+* REQ-CONC-5 (v0.2) — page-level LSN tracking; cache entries with
+  ``last_lsn`` greater than the caller's snapshot LSN are evicted so
+  external modifications are picked up.
 
 Design
 ------
@@ -20,12 +23,16 @@ flush it through to the Pager so the caller never silently loses a
 dirty write.
 
 Thread-safety: not thread-safe — matches the v0.1 single-writer fence.
+v0.2's RWLock serialises writers but the buffer pool itself remains
+single-writer for cache mutations.
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from tinydb.tx.snapshot import Snapshot
 
 
 class BufferPool:
@@ -35,6 +42,14 @@ class BufferPool:
     ``write_page(pid, data)``.  This lets tests substitute a stub Pager
     while production code passes the real
     :class:`tinydb.storage.pager.Pager`.
+
+    v0.2: callers may pass an optional :class:`Snapshot` to
+    :meth:`fetch_page`; if the cached page's last-modified LSN is
+    greater than the snapshot's LSN, the entry is invalidated and
+    the page is re-read from the Pager.  The Pager is expected to
+    expose the on-disk LSN via :attr:`Pager.last_lsn` (single LSN
+    covering the whole file; page-level LSNs are tracked in-memory
+    on the cache entry).
     """
 
     def __init__(self, pager: Any, capacity: int = 64) -> None:
@@ -44,6 +59,10 @@ class BufferPool:
         self._capacity = capacity
         # page_id -> bytes. Insertion order = recency: front=LRU, back=MRU.
         self._cache: "OrderedDict[int, bytes]" = OrderedDict()
+        # page_id -> last_lsn recorded when the page was admitted.
+        # Used by fetch_page(snapshot=...) to detect external
+        # modifications between transactions.
+        self._page_lsn: "OrderedDict[int, int]" = OrderedDict()
         # Dirty page ids. Flushed on flush_all() or before eviction.
         self._dirty: "set[int]" = set()
         # Counters for stats(). Plain ints — no stdlib Counter overhead.
@@ -62,36 +81,69 @@ class BufferPool:
 
     # -- core API ---------------------------------------------------------
 
-    def fetch_page(self, pid: int) -> bytes:
+    def fetch_page(
+        self, pid: int, *, snapshot: Optional[Snapshot] = None
+    ) -> bytes:
         """Return the cached bytes for ``pid``.
 
-        On a cache hit the page is promoted to MRU and no disk I/O occurs.
-        On a miss the page is loaded from the Pager; if the cache is full
-        the LRU page is evicted (and flushed first if dirty).
+        If ``snapshot`` is provided and the cached page's last-modified
+        LSN is greater than ``snapshot.lsn``, the cached entry is
+        dropped and the page is re-read from the Pager.  This is the
+        REQ-CONC-5 cross-process invalidation hook: a process B's
+        commit advances the on-disk ``last_lsn``, and process A's
+        next transaction (snapshot LSN < new LSN) re-reads the page
+        instead of seeing stale cached bytes.
         """
         cached = self._cache.get(pid)
         if cached is not None:
-            self._cache.move_to_end(pid)
-            self._hits += 1
-            return cached
+            if snapshot is not None:
+                page_lsn = self._page_lsn.get(pid, 0)
+                if snapshot.is_newer(page_lsn):
+                    # Stale relative to snapshot — evict and fall through
+                    # to the Pager read.
+                    self._cache.pop(pid, None)
+                    self._page_lsn.pop(pid, None)
+                    self._dirty.discard(pid)
+                else:
+                    self._cache.move_to_end(pid)
+                    self._page_lsn.move_to_end(pid)
+                    self._hits += 1
+                    return cached
+            else:
+                self._cache.move_to_end(pid)
+                self._hits += 1
+                return cached
         # Miss — load from Pager.
         self._misses += 1
         data = self._pager.read_page(pid)
-        self._admit(pid, data)
+        # Stash the on-disk LSN so future snapshot comparisons work.
+        on_disk_lsn = getattr(self._pager, "last_lsn", 0)
+        self._admit(pid, data, on_disk_lsn)
         return data
 
-    def write_page(self, pid: int, data: bytes) -> None:
+    def write_page(
+        self,
+        pid: int,
+        data: bytes,
+        *,
+        last_lsn: int = 0,
+    ) -> None:
         """Overwrite the cached copy of ``pid`` and mark it dirty.
 
         If ``pid`` is not already cached the page is admitted (which may
         evict the LRU).  The bytes will be written through to the Pager
-        on the next :meth:`flush_all`.
+        on the next :meth:`flush_all`.  ``last_lsn`` records the LSN of
+        the WAL frame that produced ``data``; pass the LSN returned by
+        :meth:`WAL.append` (the WAL's in-memory next_lsn after the
+        append, or the value the caller has tracked separately).
         """
         if pid in self._cache:
             self._cache[pid] = data
             self._cache.move_to_end(pid)
+            self._page_lsn[pid] = last_lsn
+            self._page_lsn.move_to_end(pid)
         else:
-            self._admit(pid, data)
+            self._admit(pid, data, last_lsn)
         self._dirty.add(pid)
 
     def mark_dirty(self, pid: int) -> None:
@@ -118,6 +170,16 @@ class BufferPool:
                 self._pager.write_page(pid, data)
                 self._dirty.discard(pid)
 
+    def invalidate(self, pid: int) -> None:
+        """Drop a single page from the cache.
+
+        Used by tests and the cross-process invalidation path; the
+        next :meth:`fetch_page` will read through to the Pager.
+        """
+        self._cache.pop(pid, None)
+        self._page_lsn.pop(pid, None)
+        self._dirty.discard(pid)
+
     # -- IMPROVE ----------------------------------------------------------
 
     def stats(self) -> Dict[str, int]:
@@ -126,7 +188,7 @@ class BufferPool:
 
     # -- internals --------------------------------------------------------
 
-    def _admit(self, pid: int, data: bytes) -> None:
+    def _admit(self, pid: int, data: bytes, last_lsn: int = 0) -> None:
         """Insert ``pid`` at the MRU end, evicting LRU when full.
 
         Eviction flushes dirty pages first so we never drop a dirty
@@ -137,7 +199,9 @@ class BufferPool:
             if evicted_pid in self._dirty:
                 self._pager.write_page(evicted_pid, evicted_data)
                 self._dirty.discard(evicted_pid)
+            self._page_lsn.pop(evicted_pid, None)
         self._cache[pid] = data
+        self._page_lsn[pid] = last_lsn
 
 
 __all__ = ["BufferPool"]
