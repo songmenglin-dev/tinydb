@@ -2,7 +2,7 @@
 # Derived data. Always rebuildable from artifacts. Lost/corrupt → fall back to content-level detection.
 
 # === Core state ===
-state: executing
+state: closing
 workflow: full
 
 # === Hashes (fast staleness detection) ===
@@ -12,14 +12,14 @@ contract_hash: sha256:c96afb29d9ca7805419d037fb209dcd340a02eda24d4f86be7b99c155d
 # === Execution progress ===
 execution_mode: batch_inline
 batches_completed: 9
-test_result: null
-spec_merged: false
+test_result: pass
+spec_merged: true
 
 # === Metadata ===
 change_name: tinydb
-last_transition: 2026-07-09T10:08:42.899Z
-last_transition_from: approved-for-build
-last_transition_to: executing
+last_transition: 2026-07-14T07:59:16.498Z
+last_transition_from: executing
+last_transition_to: closing
 
 # === Decision points ===
 dp_0_decisions: change=.; intent=从零构建 Python 嵌入式关系型数据库 tinydb (SQL/存储/查询/索引/事务/类型/CLI); scope=严格 stay focused, 不做 JOIN/并发/外键/视图/触发器/网络; constraints=Python 3.10+, 零外部依赖, 单 .db 文件, B-tree 索引, WAL 事务, pytest 80%+; comms=逐决策点询问
@@ -36,7 +36,7 @@ dp_4_result: Batch 4 (B-tree Index) escalation: SDD mode active. T-4.1..T-4.6 cr
 dp_4_timestamp: 2026-07-10T05:28:41Z
 dp_5_result: null
 dp_5_timestamp: null
-dp_6_result: null
-dp_6_timestamp: null
-dp_7_result: null
-dp_7_timestamp: null
+dp_6_result: Release gate passed: 4 acceptance checks all green (full pytest 826/826 PASS, coverage 91.44% >= 80% gate, scope audit no-violations vs proposal Out list, 0 external deps confirmed, all 9 batches completed 47/47 tasks, artifacts intact 4+1+7+1). Routing to release-archivist (DP-7).
+dp_6_timestamp: 2026-07-14T05:15:21Z
+dp_7_result: confirmed: change archived. 9/9 batches closed (47/47 tasks). 826/826 tests pass. coverage 91.44% (>=80% gate). 0 external deps. scope audit no-violations (JOIN false-positive in tokenizer keyword list). artifacts: proposal + design(13) + specs(7/61 REQ) + tasks(9/47) + execution-contract. merged to master (commit 243c968). no delta specs. tinydb v0.1 released.
+dp_7_timestamp: 2026-07-14T05:26:25Z

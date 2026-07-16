@@ -6,6 +6,21 @@
 
 ---
 
+
+## Batch Completion Status (B1–B9 all closed)
+
+- [x] Batch 1 — Foundation (no DB I/O) — 5/5 tasks complete (T-1.1..T-1.5)
+- [x] Batch 2 — Storage (single-file persistence) — 4/4 tasks complete (T-2.1..T-2.4)
+- [x] Batch 3 — SQL Parser (no execution yet) — 8/8 tasks complete (T-3.1..T-3.8)
+- [x] Batch 4 — B-tree Index — 6/6 tasks complete (T-4.1..T-4.6)
+- [x] Batch 5 — Query Executor — 6/6 tasks complete (T-5.1..T-5.6)
+- [x] Batch 6 — Transactions & WAL — 7/7 tasks complete (T-6.1..T-6.7)
+- [x] Batch 7 — Public API — 2/2 tasks complete (T-7.1..T-7.2)
+- [x] Batch 8 — CLI — 5/5 tasks complete (T-8.1..T-8.5)
+- [x] Batch 9 — Polish & Release Prep — 4/4 tasks complete (T-9.1..T-9.4)
+
+**47/47 tasks complete**.  All 9 batches closed.  Released 2026-07-14.
+
 ## File Structure
 
 ### Create — Project Skeleton
