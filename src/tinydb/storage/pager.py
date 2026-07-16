@@ -24,7 +24,12 @@ Header (page 0) byte layout
 * ``12..15``: ``u32`` total pages currently allocated in the file.
 * ``16..19``: ``u32`` head of the free-page linked list, or
   ``0xFFFFFFFF`` when empty.
-* ``20..4095``: reserved, currently zero.
+* ``20..23``: ``u32`` ``last_lsn`` — the LSN of the last WAL frame
+  whose effects are reflected in the on-disk file.  v0.1 writes 0 here
+  because it does not maintain this field; v0.2 updates it on each
+  successful WAL fsync so cross-process readers can detect external
+  writes (REQ-CONC-5).
+* ``24..4095``: reserved, currently zero.
 
 The free list itself is a singly linked list threading through free
 pages: each free page stores the next free ``page_id`` (or
@@ -68,12 +73,14 @@ _HDR_VERSION_OFF: int = 8
 _HDR_PAGE_SIZE_OFF: int = 10
 _HDR_NUM_PAGES_OFF: int = 12
 _HDR_FREE_HEAD_OFF: int = 16
+_HDR_LAST_LSN_OFF: int = 20
 
 # Layout of the header in bytes (struct format + size for re-use).
 _HEADER_NUM_PAGES_STRUCT = struct.Struct("<I")
 _HEADER_FREE_HEAD_STRUCT = struct.Struct("<I")
 _HEADER_VERSION_STRUCT = struct.Struct("<H")
 _HEADER_PAGE_SIZE_STRUCT = struct.Struct("<H")
+_HEADER_LAST_LSN_STRUCT = struct.Struct("<I")
 _FREE_NEXT_STRUCT = struct.Struct("<I")
 
 PathLike = Union[str, os.PathLike]
@@ -99,6 +106,10 @@ class Pager:
         self._page_size: int = page_size
         self._num_pages: int = 0
         self._free_head: int = _NO_FREE
+        # v0.2: last WAL LSN whose effects are on disk.  v0.1 files
+        # are opened with last_lsn == 0 (the field is reserved in
+        # their header) so backward compatibility is preserved.
+        self._last_lsn: int = 0
         self._fp: IO[bytes] | None = None
         self._closed: bool = False
         try:
@@ -181,6 +192,11 @@ class Pager:
         (self._free_head,) = _HEADER_FREE_HEAD_STRUCT.unpack_from(
             header, _HDR_FREE_HEAD_OFF
         )
+        # v0.2 last_lsn is a backward-compat add: v0.1 files leave the
+        # 4 bytes at offset 20 as zeros, so unpacking always succeeds.
+        self._last_lsn = _HEADER_LAST_LSN_STRUCT.unpack_from(
+            header, _HDR_LAST_LSN_OFF
+        )[0]
 
     def _write_header(self) -> None:
         assert self._fp is not None
@@ -197,6 +213,7 @@ class Pager:
         _HEADER_PAGE_SIZE_STRUCT.pack_into(buf, _HDR_PAGE_SIZE_OFF, self._page_size)
         _HEADER_NUM_PAGES_STRUCT.pack_into(buf, _HDR_NUM_PAGES_OFF, self._num_pages)
         _HEADER_FREE_HEAD_STRUCT.pack_into(buf, _HDR_FREE_HEAD_OFF, self._free_head)
+        _HEADER_LAST_LSN_STRUCT.pack_into(buf, _HDR_LAST_LSN_OFF, self._last_lsn)
         self._fp.seek(0)
         self._fp.write(bytes(buf))
         self._fp.flush()
@@ -246,6 +263,31 @@ class Pager:
     @property
     def path(self) -> Path:
         return self._path
+
+    @property
+    def last_lsn(self) -> int:
+        """LSN of the most recent WAL frame whose effects are on disk.
+
+        v0.2: read by :class:`tinydb.tx.snapshot.Snapshot` and the
+        BufferPool to detect external modifications.  Defaults to 0
+        for v0.1 files that have never been touched by a v0.2 writer.
+        """
+        self._check_open()
+        return self._last_lsn
+
+    def set_last_lsn(self, lsn: int) -> None:
+        """Stamp ``lsn`` into the on-disk header (REQ-CONC-5).
+
+        Called by the transaction manager on COMMIT after the WAL
+        has been fsynced.  Updates the in-memory copy and rewrites
+        page 0 (which is the only header page).
+        """
+        if lsn < 0:
+            raise ValueError(f"lsn must be >= 0, got {lsn}")
+        self._check_open()
+        if lsn > self._last_lsn:
+            self._last_lsn = lsn
+            self._write_header()
 
     # -- page primitives (REQ-STO-4) --------------------------------------
 
@@ -368,6 +410,7 @@ class Pager:
         _HEADER_PAGE_SIZE_STRUCT.pack_into(buf, _HDR_PAGE_SIZE_OFF, self._page_size)
         _HEADER_NUM_PAGES_STRUCT.pack_into(buf, _HDR_NUM_PAGES_OFF, self._num_pages)
         _HEADER_FREE_HEAD_STRUCT.pack_into(buf, _HDR_FREE_HEAD_OFF, self._free_head)
+        _HEADER_LAST_LSN_STRUCT.pack_into(buf, _HDR_LAST_LSN_OFF, self._last_lsn)
         return bytes(buf)
 
     def _check_open(self) -> None:
