@@ -1,0 +1,223 @@
+"""JOIN feature tests — REQ-JOIN-1..10.
+
+Tests are organised by requirement; the test name encodes the REQ
+prefix.  The first batch (T-10.1) covers pure AST construction; the
+parser / planner / executor tests follow.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from tinydb.errors import ParseError, TinydbError
+from tinydb.sql.ast import (
+    BinaryOp,
+    ColumnRef,
+    Join,
+    JoinKind,
+    Literal,
+    Select,
+    Star,
+    Table,
+    TableRef,
+)
+from tinydb.sql.parser import parse
+
+
+# --- REQ-JOIN-1, REQ-JOIN-2, REQ-JOIN-3, REQ-JOIN-4, REQ-JOIN-5: AST shape
+
+
+class TestASTNodes:
+    """T-10.1 — JoinPlan/JoinKind/TableRef AST nodes."""
+
+    def test_join_kind_constants(self) -> None:
+        assert JoinKind.INNER == "INNER"
+        assert JoinKind.LEFT == "LEFT"
+
+    def test_table_dataclass_construction(self) -> None:
+        t = Table(name="users", alias="u")
+        assert t.name == "users"
+        assert t.alias == "u"
+        assert isinstance(t, TableRef)
+
+    def test_table_default_no_alias(self) -> None:
+        t = Table(name="users")
+        assert t.alias is None
+
+    def test_join_dataclass_inner(self) -> None:
+        a = Table(name="users", alias="u")
+        b = Table(name="orders", alias="o")
+        cond = BinaryOp("=", ColumnRef("id", "u"), ColumnRef("user_id", "o"))
+        j = Join(left=a, right=b, kind=JoinKind.INNER, on_expr=cond)
+        assert j.kind == "INNER"
+        assert j.on_expr is cond
+        assert j.using == ()
+        assert j.nullable_right is False
+
+    def test_join_dataclass_left_nullable(self) -> None:
+        a = Table(name="users")
+        b = Table(name="orders")
+        cond = BinaryOp("=", ColumnRef("id", "u"), ColumnRef("user_id", "o"))
+        j = Join(left=a, right=b, kind=JoinKind.LEFT, on_expr=cond, nullable_right=True)
+        assert j.kind == "LEFT"
+        assert j.nullable_right is True
+
+    def test_join_with_using(self) -> None:
+        a = Table(name="t1")
+        b = Table(name="t2")
+        j = Join(left=a, right=b, kind=JoinKind.INNER, on_expr=None, using=("user_id",))
+        assert j.using == ("user_id",)
+        assert j.on_expr is None
+
+    def test_join_is_hashable(self) -> None:
+        a = Table(name="a")
+        b = Table(name="b")
+        j1 = Join(left=a, right=b, kind=JoinKind.INNER, on_expr=None)
+        j2 = Join(left=a, right=b, kind=JoinKind.INNER, on_expr=None)
+        assert hash(j1) == hash(j2)
+        assert j1 == j2
+
+    def test_select_from_legacy_table_property(self) -> None:
+        t = Table(name="events")
+        s = Select(columns=(Star(),), from_=t)
+        # v0.1 callers that read stmt.table keep working
+        assert s.table == "events"
+
+    def test_select_table_property_raises_for_join(self) -> None:
+        a = Table(name="a")
+        b = Table(name="b")
+        j = Join(left=a, right=b, kind=JoinKind.INNER, on_expr=None)
+        s = Select(columns=(Star(),), from_=j)
+        with pytest.raises(AttributeError):
+            _ = s.table
+
+
+# --- REQ-JOIN-1, REQ-JOIN-2: parser tests (RED until parser is extended)
+
+
+class TestParserJoinOn:
+    """T-10.2 — JOIN ... ON clause parsing."""
+
+    def test_inner_join_keyword(self) -> None:
+        sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id"
+        stmt = parse(sql)
+        assert isinstance(stmt, Select)
+        # Top-level from_ is a Join, not a Table.
+        assert isinstance(stmt.from_, Join)
+        assert stmt.from_.kind == JoinKind.INNER
+        assert isinstance(stmt.from_.left, Table)
+        assert stmt.from_.left.name == "users"
+        assert stmt.from_.left.alias == "u"
+        assert isinstance(stmt.from_.right, Table)
+        assert stmt.from_.right.alias == "o"
+
+    def test_join_without_inner_keyword_defaults_to_inner(self) -> None:
+        sql = "SELECT * FROM a JOIN b ON a.id = b.aid"
+        stmt = parse(sql)
+        assert isinstance(stmt.from_, Join)
+        assert stmt.from_.kind == JoinKind.INNER
+
+    def test_join_missing_on_raises(self) -> None:
+        with pytest.raises(ParseError) as exc:
+            parse("SELECT * FROM a INNER JOIN b")
+        assert "JOIN requires ON or USING clause" in str(exc.value)
+
+    def test_left_join_keyword(self) -> None:
+        sql = "SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id"
+        stmt = parse(sql)
+        assert isinstance(stmt.from_, Join)
+        assert stmt.from_.kind == JoinKind.LEFT
+        assert stmt.from_.nullable_right is True
+
+    def test_left_outer_join_equals_left(self) -> None:
+        sql = "SELECT * FROM users LEFT OUTER JOIN orders ON users.id = orders.user_id"
+        stmt = parse(sql)
+        assert isinstance(stmt.from_, Join)
+        assert stmt.from_.kind == JoinKind.LEFT
+
+    def test_three_table_join_nests_left_associative(self) -> None:
+        sql = "SELECT * FROM a JOIN b ON a.id = b.aid JOIN c ON b.id = c.bid"
+        stmt = parse(sql)
+        # ((a ⋈ b) ⋈ c): outer Join.left is a Join, outer.right is c
+        assert isinstance(stmt.from_, Join)
+        assert isinstance(stmt.from_.left, Join)
+        assert stmt.from_.left.kind == JoinKind.INNER
+        assert isinstance(stmt.from_.right, Table)
+        assert stmt.from_.right.name == "c"
+
+    def test_six_table_join_rejected(self) -> None:
+        # 7 tables joined = 6 JOIN keywords = 6 wrappers, which exceeds
+        # REQ-JOIN-5's max of 5.
+        sql = (
+            "SELECT * FROM a "
+            "JOIN b ON a.id=b.aid "
+            "JOIN c ON b.id=c.bid "
+            "JOIN d ON c.id=c.did "
+            "JOIN e ON d.id=d.eid "
+            "JOIN f ON e.id=e.fid "
+            "JOIN g ON f.id=g.fid"
+        )
+        with pytest.raises(ParseError) as exc:
+            parse(sql)
+        assert "JOIN nesting depth exceeds 5" in str(exc.value)
+
+
+# --- REQ-JOIN-3: USING clause
+
+
+class TestParserUsing:
+    """T-10.3 — JOIN ... USING (col1, col2, ...) parsing."""
+
+    def test_single_column_using(self) -> None:
+        sql = "SELECT * FROM users JOIN orders USING (user_id)"
+        stmt = parse(sql)
+        assert isinstance(stmt.from_, Join)
+        assert stmt.from_.using == ("user_id",)
+        assert stmt.from_.on_expr is None
+
+    def test_multi_column_using(self) -> None:
+        sql = "SELECT * FROM t1 JOIN t2 USING (a, b)"
+        stmt = parse(sql)
+        assert isinstance(stmt.from_, Join)
+        assert stmt.from_.using == ("a", "b")
+
+
+# --- REQ-JOIN-4: table aliases
+
+
+class TestParserAlias:
+    """T-10.4 — FROM table alias form."""
+
+    def test_alias_after_table_name(self) -> None:
+        sql = "SELECT u.name FROM users u WHERE u.age > 18"
+        stmt = parse(sql)
+        assert isinstance(stmt, Select)
+        assert isinstance(stmt.from_, Table)
+        assert stmt.from_.name == "users"
+        assert stmt.from_.alias == "u"
+
+    def test_no_alias_returns_none(self) -> None:
+        sql = "SELECT name FROM users"
+        stmt = parse(sql)
+        assert isinstance(stmt.from_, Table)
+        assert stmt.from_.alias is None
+
+
+# --- REQ-JOIN-8: ambiguous column error (planning layer)
+
+
+class TestAmbiguousColumnError:
+    """T-11.4 — bare column name appears in both tables."""
+
+    def test_ambiguous_column_raises(self) -> None:
+        # We don't have an executor wired up yet, but the parser path
+        # is exercised and we mark this test as failing until the
+        # planner emits the right error.
+        from tinydb.sql.parser import parse_dml_string
+
+        sql = (
+            "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id"
+        )
+        stmt = parse_dml_string(sql)
+        assert isinstance(stmt, Select)
+        assert isinstance(stmt.from_, Join)
