@@ -213,25 +213,104 @@ def _wrap_with_select_clauses(
     stmt: Select,
     catalog: Catalog,
 ) -> Plan:
-    """Apply WHERE → Project → Sort → Limit on top of a JOIN plan.
+    """Apply WHERE → Aggregate → Project → Sort → Limit on top of a JOIN plan.
 
     All table-metas come from the FROM tree so we know each column's
-    source table for projection dedup (REQ-JOIN-8).
+    source table for projection dedup (REQ-JOIN-8).  T-13.1 extends
+    the single-table behaviour to JOIN sources so aggregates over a
+    joined stream (``SELECT COUNT(*) FROM users JOIN orders``) work
+    the same way they do for a single table.
     """
     # Validate WHERE columns against every table in the FROM tree.
     if stmt.where is not None:
         _validate_join_where(stmt.where, stmt, catalog)
         src = Filter(src=src, predicate=stmt.where)
-    # Project with deduplicated USING columns.
-    src = Project(
-        src=src,
-        columns=_join_projection_columns(stmt, catalog),
-        items=tuple(stmt.columns),
+    # T-13.1: aggregates over a joined stream — wire the same
+    # AggregatePlan the single-table path uses, so COUNT/SUM/AVG/
+    # MIN/MAX and GROUP BY all work over JOIN results too.  When the
+    # SELECT list carries aggregates the row layout changes to
+    # ``(group_keys..., agg_values...)``, so the projection step that
+    # follows must operate on the AggregatePlan output, not on the
+    # Join's merged layout.
+    agg_pairs: tuple = tuple(
+        (c.func, c.column) for c in stmt.columns if isinstance(c, Aggregate)
     )
-    # ORDER BY — columns may be unqualified if unambiguous.
-    if stmt.order_by:
-        keys = [(ob.column, ob.descending) for ob in stmt.order_by]
-        src = SortPlan(src=src, keys=keys)
+    if agg_pairs or stmt.group_by:
+        from tinydb.executor.aggregate import Aggregate as AggregatePlan
+
+        # GROUP BY keys may be unqualified (validator already
+        # disambiguated single-table refs upstream).
+        keys = tuple(stmt.group_by)
+        # Validate that each GROUP BY column resolves somewhere in
+        # the joined schema; UnknownColumnError otherwise.
+        if keys:
+            known: set = set()
+            for table in _all_tables_in_from(stmt.from_):
+                meta = _require_table(table, catalog)
+                for c in meta_column_names(meta):
+                    known.add(c)
+            for col in keys:
+                if col not in known:
+                    raise UnknownColumnError(col)
+        src = AggregatePlan(src=src, aggregates=agg_pairs, keys=keys)
+        # After an aggregate the projection list is just the SELECT
+        # items — no USING dedup is meaningful on the post-aggregate
+        # layout because the aggregates change the row shape.
+        proj_cols: list = []
+        seen: set = set()
+        for item in stmt.columns:
+            if isinstance(item, Aggregate):
+                label = f"{item.func}({item.column})"
+                if label not in seen:
+                    proj_cols.append(label)
+                    seen.add(label)
+            elif isinstance(item, ColumnRef):
+                if item.name not in seen:
+                    proj_cols.append(item.name)
+                    seen.add(item.name)
+            elif isinstance(item, Literal):
+                label = f"L:{item.value!r}"
+                if label not in seen:
+                    proj_cols.append(label)
+                    seen.add(label)
+            elif isinstance(item, TypedLiteral):
+                label = f"L[{item.tag.name}]:{item.value!r}"
+                if label not in seen:
+                    proj_cols.append(label)
+                    seen.add(label)
+            elif isinstance(item, Star):
+                # Star over an aggregate: emit every aggregate label.
+                for func, col in agg_pairs:
+                    label = f"{func}({col})"
+                    if label not in seen:
+                        proj_cols.append(label)
+                        seen.add(label)
+            else:
+                label = type(item).__name__
+                if label not in seen:
+                    proj_cols.append(label)
+                    seen.add(label)
+        # Project the aggregate output.
+        if stmt.order_by:
+            src = SortPlan(
+                src=Project(src=src, columns=proj_cols, items=()),
+                keys=[
+                    (ob.column, ob.descending) for ob in stmt.order_by
+                ],
+            )
+        else:
+            src = Project(src=src, columns=proj_cols, items=())
+    else:
+        # Project with deduplicated USING columns.
+        src = Project(
+            src=src,
+            columns=_join_projection_columns(stmt, catalog),
+            items=tuple(stmt.columns),
+        )
+        # ORDER BY — columns may be unqualified if unambiguous.
+        if stmt.order_by:
+            keys = [(ob.column, ob.descending) for ob in stmt.order_by]
+            src = SortPlan(src=src, keys=keys)
     if stmt.limit is not None or stmt.offset:
         src = LimitPlan(
             src=src,

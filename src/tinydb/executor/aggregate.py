@@ -91,7 +91,26 @@ class Aggregate(Plan):
         return self.src.table
 
     def open(self, ctx: "Executor") -> Iterator[Row]:  # noqa: F821
-        n2i = ctx.name_to_idx_for(self.table)
+        # T-13.1: when the source is a JOIN tree, ``self.table`` is the
+        # leftmost leaf and ``name_to_idx_for(self.table)`` only sees
+        # that side's columns — so right-side columns (the very thing
+        # aggregates like ``SUM(o.total)`` need) would be invisible.
+        # Walk the source for a JOIN and use the merged recursive
+        # ``row_n2i_for_plan`` map instead.
+        from tinydb.executor.join import (
+            IndexedNestedLoopJoin,
+            NestedLoopJoin,
+            row_n2i_for_plan,
+        )
+        candidate = self.src
+        while hasattr(candidate, "src") and not isinstance(
+            candidate, (NestedLoopJoin, IndexedNestedLoopJoin)
+        ):
+            candidate = candidate.src
+        if isinstance(candidate, (NestedLoopJoin, IndexedNestedLoopJoin)):
+            n2i = row_n2i_for_plan(candidate, ctx)
+        else:
+            n2i = ctx.name_to_idx_for(self.table)
         # ``groups[key]`` is a tuple of per-aggregate state dicts so
         # each func maintains its own slots without cross-talk.
         groups: dict = {}

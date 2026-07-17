@@ -236,7 +236,10 @@ def _plan_select(
     # PhysicalPlanner (T-12.6), then wrap with WHERE/Project/Sort/Limit.
     from tinydb.executor.logical import emit_logical
     from tinydb.executor.physical import _wrap_with_select_clauses as _wrap
-    logical = emit_logical(stmt)
+    # T-13.1: pass the catalog so emit_logical can build a real
+    # column → owner map and only flag bare columns that genuinely
+    # exist in multiple joined tables (REQ-JOIN-8).
+    logical = emit_logical(stmt, catalog=catalog)
     phys_planner = PhysicalPlanner(catalog, indexer)
     physical = phys_planner.plan(logical)
     # ``PhysicalPlan.steps`` carries the root node; v0.2 SELECTs only
