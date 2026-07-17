@@ -629,13 +629,19 @@ class _Parser:
         return tuple(items)
 
     def _parse_order_by_item(self) -> OrderBy:
+        # ORDER BY <col> [ASC|DESC] — accept both bare and qualified
+        # (``alias.col``) column refs so JOIN queries work.
         col_tok = self._expect_ident()
+        col_name = col_tok.value
+        if self._match_kind(TokenKind.DOT):
+            inner = self._expect_ident()
+            col_name = inner.value
         descending = False
         if self._match_keyword("DESC"):
             descending = True
         elif self._match_keyword("ASC"):
             descending = False  # explicit ASC; default already False
-        return OrderBy(column=col_tok.value, descending=descending)
+        return OrderBy(column=col_name, descending=descending)
 
     def _parse_ident_list(self) -> tuple:
         """Comma-separated IDENT list — used by GROUP BY and similar."""
