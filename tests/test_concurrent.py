@@ -352,6 +352,81 @@ def test_process_lock_unavailable_error_is_clear(tmp_path: Path) -> None:
     _ensure_locking_available()
 
 
+def test_wal_acquires_process_lock(tmp_path: Path) -> None:
+    """T-17.2 — REQ-CONC-2: WAL.append() acquires the cross-process file lock.
+
+    With ``use_process_lock=True`` the WAL opener instantiates a
+    :class:`ProcessLock` per append.  Two WAL instances pointing at the
+    same file must serialize their appends at the file-lock level,
+    even when only one is the "use_process_lock" writer.  This test
+    exercises that wire-up on a single process first (the cross-process
+    case is covered by ``test_process_lock_blocks_other_process``).
+
+    Strategy: open the same file twice.  Have the second fd hold a
+    :class:`ProcessLock` exclusive for a moment, then verify the WAL's
+    ``append`` (which now wraps an internal ProcessLock acquisition)
+    blocks until the external lock is released.  We instrument the
+    append via a short sleep in the holder.
+    """
+    import fcntl as _fcntl
+    import os as _os
+    import threading as _threading
+    from tinydb.tx.wal import WAL
+
+    p = tmp_path / "locktest.wal"
+    p.write_bytes(b"")
+
+    holder_done = _threading.Event()
+    append_can_run = _threading.Event()
+
+    def hold_then_release(duration: float) -> None:
+        fp = open(p, "r+b")
+        try:
+            op = _fcntl.LOCK_EX
+            _fcntl.flock(fp.fileno(), op)
+            try:
+                append_can_run.set()
+                _os.path.exists(p)  # touch
+                import time as _time
+                _time.sleep(duration)
+            finally:
+                _fcntl.flock(fp.fileno(), _fcntl.LOCK_UN)
+        finally:
+            fp.close()
+            holder_done.set()
+
+    # Skip on non-POSIX — fcntl isn't importable.
+    if _os.name != "posix":
+        pytest.skip("POSIX-only test")
+
+    # Holder thread grabs the lock first, then we have the WAL append.
+    holder = _threading.Thread(target=hold_then_release, args=(0.3,))
+    holder.start()
+    try:
+        append_can_run.wait(timeout=1.0)
+
+        # Open the WAL with use_process_lock=True; append should block.
+        wal = WAL(p, mode="r+b", use_process_lock=True)
+        try:
+            t0 = time.monotonic()
+            wal.append(1, b"hello")
+            elapsed = time.monotonic() - t0
+            # The append must have waited at least 0.2s — i.e. the holder
+            # held the lock at least 0.2s, and our append blocked until
+            # the holder released.
+            assert elapsed >= 0.15, (
+                f"WAL append did not block on external lock "
+                f"(elapsed={elapsed:.3f}s)"
+            )
+            # And the WAL recorded the append after the holder released.
+            assert wal.next_lsn == 2
+        finally:
+            wal.close()
+    finally:
+        holder.join(timeout=2.0)
+        assert holder_done.is_set()
+
+
 # --------------------------------------------------------------------------
 # Snapshot — REQ-CONC-3
 # --------------------------------------------------------------------------
