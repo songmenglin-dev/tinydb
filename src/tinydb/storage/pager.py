@@ -24,7 +24,12 @@ Header (page 0) byte layout
 * ``12..15``: ``u32`` total pages currently allocated in the file.
 * ``16..19``: ``u32`` head of the free-page linked list, or
   ``0xFFFFFFFF`` when empty.
-* ``20..4095``: reserved, currently zero.
+* ``20..23``: ``u32`` ``last_lsn`` — the LSN of the last WAL frame
+  whose effects are reflected in the on-disk file.  v0.1 writes 0 here
+  because it does not maintain this field; v0.2 updates it on each
+  successful WAL fsync so cross-process readers can detect external
+  writes (REQ-CONC-5).
+* ``24..4095``: reserved, currently zero.
 
 The free list itself is a singly linked list threading through free
 pages: each free page stores the next free ``page_id`` (or
@@ -37,6 +42,7 @@ from __future__ import annotations
 
 import os
 import struct
+import threading
 from pathlib import Path
 from typing import IO, Union
 
@@ -68,12 +74,14 @@ _HDR_VERSION_OFF: int = 8
 _HDR_PAGE_SIZE_OFF: int = 10
 _HDR_NUM_PAGES_OFF: int = 12
 _HDR_FREE_HEAD_OFF: int = 16
+_HDR_LAST_LSN_OFF: int = 20
 
 # Layout of the header in bytes (struct format + size for re-use).
 _HEADER_NUM_PAGES_STRUCT = struct.Struct("<I")
 _HEADER_FREE_HEAD_STRUCT = struct.Struct("<I")
 _HEADER_VERSION_STRUCT = struct.Struct("<H")
 _HEADER_PAGE_SIZE_STRUCT = struct.Struct("<H")
+_HEADER_LAST_LSN_STRUCT = struct.Struct("<I")
 _FREE_NEXT_STRUCT = struct.Struct("<I")
 
 PathLike = Union[str, os.PathLike]
@@ -99,8 +107,21 @@ class Pager:
         self._page_size: int = page_size
         self._num_pages: int = 0
         self._free_head: int = _NO_FREE
+        # v0.2: last WAL LSN whose effects are on disk.  v0.1 files
+        # are opened with last_lsn == 0 (the field is reserved in
+        # their header) so backward compatibility is preserved.
+        self._last_lsn: int = 0
         self._fp: IO[bytes] | None = None
         self._closed: bool = False
+        # v0.2 file-handle lock — guards every seek+read+write that
+        # touches ``self._fp``.  Multiple BufferPool / Heap / Pager
+        # callers can race on the FILE POINTER itself (Python file
+        # objects are not safe for concurrent seek/read), so all access
+        # to ``self._fp`` goes through ``self._fp_lock``.
+        # This lock is intra-process only; cross-process safety is
+        # handled by the WAL :class:`tinydb.concurrent.ProcessLock`
+        # wiring in ``Database(use_process_lock=True)`` (REQ-CONC-2).
+        self._fp_lock = threading.Lock()
         try:
             self._open_file()
         except Exception:
@@ -181,8 +202,25 @@ class Pager:
         (self._free_head,) = _HEADER_FREE_HEAD_STRUCT.unpack_from(
             header, _HDR_FREE_HEAD_OFF
         )
+        # v0.2 last_lsn is a backward-compat add: v0.1 files leave the
+        # 4 bytes at offset 20 as zeros, so unpacking always succeeds.
+        self._last_lsn = _HEADER_LAST_LSN_STRUCT.unpack_from(
+            header, _HDR_LAST_LSN_OFF
+        )[0]
 
     def _write_header(self) -> None:
+        """Rewrite the on-disk header page (page 0), locking internally."""
+        with self._fp_lock:
+            self._write_header_unlocked()
+
+    def _write_header_unlocked(self) -> None:
+        """Rewrite the header — caller must hold :attr:`_fp_lock`.
+
+        v0.2 hot path: every commit/extend needs a header flush. This
+        internal helper exists so callers that already hold the lock
+        (write_page, allocate_page, free_page, _extend_to_unlocked)
+        can avoid re-entering the lock.
+        """
         assert self._fp is not None
         # Read the current page 0 so we preserve any caller-written bytes
         # in the reserved region (offsets >= 20).  The header is the only
@@ -197,6 +235,7 @@ class Pager:
         _HEADER_PAGE_SIZE_STRUCT.pack_into(buf, _HDR_PAGE_SIZE_OFF, self._page_size)
         _HEADER_NUM_PAGES_STRUCT.pack_into(buf, _HDR_NUM_PAGES_OFF, self._num_pages)
         _HEADER_FREE_HEAD_STRUCT.pack_into(buf, _HDR_FREE_HEAD_OFF, self._free_head)
+        _HEADER_LAST_LSN_STRUCT.pack_into(buf, _HDR_LAST_LSN_OFF, self._last_lsn)
         self._fp.seek(0)
         self._fp.write(bytes(buf))
         self._fp.flush()
@@ -247,6 +286,31 @@ class Pager:
     def path(self) -> Path:
         return self._path
 
+    @property
+    def last_lsn(self) -> int:
+        """LSN of the most recent WAL frame whose effects are on disk.
+
+        v0.2: read by :class:`tinydb.tx.snapshot.Snapshot` and the
+        BufferPool to detect external modifications.  Defaults to 0
+        for v0.1 files that have never been touched by a v0.2 writer.
+        """
+        self._check_open()
+        return self._last_lsn
+
+    def set_last_lsn(self, lsn: int) -> None:
+        """Stamp ``lsn`` into the on-disk header (REQ-CONC-5).
+
+        Called by the transaction manager on COMMIT after the WAL
+        has been fsynced.  Updates the in-memory copy and rewrites
+        page 0 (which is the only header page).
+        """
+        if lsn < 0:
+            raise ValueError(f"lsn must be >= 0, got {lsn}")
+        self._check_open()
+        if lsn > self._last_lsn:
+            self._last_lsn = lsn
+            self._write_header()
+
     # -- page primitives (REQ-STO-4) --------------------------------------
 
     def read_page(self, pid: int) -> bytes:
@@ -254,6 +318,11 @@ class Pager:
 
         Raises :class:`IndexError` if ``pid`` is negative or beyond the
         currently allocated page count.
+
+        Thread-safety (v0.2): the seek+read on ``self._fp`` is held
+        under :attr:`_fp_lock` so multiple threads can't interleave
+        their read offsets.  The lock is intra-process only;
+        cross-process safety lives in the WAL ProcessLock.
         """
         self._check_open()
         if pid < 0:
@@ -263,8 +332,9 @@ class Pager:
                 f"page_id {pid} beyond allocated {self._num_pages}"
             )
         assert self._fp is not None
-        self._fp.seek(pid * self._page_size)
-        data = self._fp.read(self._page_size)
+        with self._fp_lock:
+            self._fp.seek(pid * self._page_size)
+            data = self._fp.read(self._page_size)
         if len(data) != self._page_size:
             raise OSError(
                 f"short read on page {pid}: expected {self._page_size} bytes, "
@@ -279,6 +349,12 @@ class Pager:
         zero-filled pages.  Writing to page 0 protects the on-disk
         header fields — only the reserved region (offset >= 20) is
         caller-controlled.
+
+        Thread-safety (v0.2): seek+write goes through
+        :attr:`_fp_lock`.  Header rewrites (``pid == 0``) and
+        extension to a higher page are serialized against concurrent
+        reads — without that, a reader could see a header-flush
+        mid-update or an under-extended file.
         """
         self._check_open()
         if len(data) != self._page_size:
@@ -289,38 +365,60 @@ class Pager:
         if pid < 0:
             raise IndexError(f"page_id {pid} < 0")
         assert self._fp is not None
+        # Mutating state held outside the fp_lock so concurrent
+        # read_page() bounds checks stay accurate.
         if pid >= self._num_pages:
-            self._extend_to(pid + 1)
-        if pid == 0:
-            data = self._protect_header(data)
-        self._fp.seek(pid * self._page_size)
-        self._fp.write(data)
-        self._fp.flush()
+            target = pid + 1
+        else:
+            target = -1
+        if target < 0:
+            # In-bounds write — same lock as read_page to avoid seek races.
+            with self._fp_lock:
+                if pid == 0:
+                    data = self._protect_header(data)
+                self._fp.seek(pid * self._page_size)
+                self._fp.write(data)
+                self._fp.flush()
+            return
+        # Out-of-bounds write requires extending the file first.
+        with self._fp_lock:
+            if pid >= self._num_pages:
+                self._extend_to_unlocked(target)
+            if pid == 0:
+                data = self._protect_header(data)
+            self._fp.seek(pid * self._page_size)
+            self._fp.write(data)
+            self._fp.flush()
 
     def allocate_page(self) -> int:
         """Return a fresh, zero-filled ``page_id``.
 
         Prefers the free list; falls back to extending the file.
+
+        Thread-safety (v0.2): the free-list mutation and the file
+        extension both go through :attr:`_fp_lock`; pairs of
+        ``allocate_page`` / ``free_page`` callers cannot race.
         """
         self._check_open()
         assert self._fp is not None
-        if self._free_head != _NO_FREE:
-            pid = self._free_head
-            # Pop the head: read the next pointer from the page itself.
-            self._fp.seek(pid * self._page_size)
-            (next_free,) = _FREE_NEXT_STRUCT.unpack(self._fp.read(4))
-            self._free_head = next_free
-            # The re-allocated page is no longer free — zero it so callers
-            # don't observe the stale next-pointer.
-            self._fp.seek(pid * self._page_size)
-            self._fp.write(b"\x00" * self._page_size)
-            self._fp.flush()
-            self._write_header()
+        with self._fp_lock:
+            if self._free_head != _NO_FREE:
+                pid = self._free_head
+                # Pop the head: read the next pointer from the page itself.
+                self._fp.seek(pid * self._page_size)
+                (next_free,) = _FREE_NEXT_STRUCT.unpack(self._fp.read(4))
+                self._free_head = next_free
+                # The re-allocated page is no longer free — zero it so callers
+                # don't observe the stale next-pointer.
+                self._fp.seek(pid * self._page_size)
+                self._fp.write(b"\x00" * self._page_size)
+                self._fp.flush()
+                self._write_header_unlocked()
+                return pid
+            # No free page: extend the file by one.
+            pid = self._num_pages
+            self._extend_to_unlocked(pid + 1)
             return pid
-        # No free page: extend the file by one.
-        pid = self._num_pages
-        self._extend_to(pid + 1)
-        return pid
 
     def free_page(self, pid: int) -> None:
         """Return ``pid`` to the free list.
@@ -328,6 +426,9 @@ class Pager:
         Reserved pages (0..3) cannot be freed.  The file length is not
         reduced — tinydb reuses pages via the free list rather than
         truncating.
+
+        Thread-safety (v0.2): the free-list link + write + header
+        rewrite all go through :attr:`_fp_lock`.
         """
         self._check_open()
         if pid < 0:
@@ -339,17 +440,29 @@ class Pager:
         if pid >= self._num_pages:
             raise ValueError(f"page_id {pid} beyond allocated {self._num_pages}")
         assert self._fp is not None
-        # Link this page in front of the free list.
-        self._fp.seek(pid * self._page_size)
-        self._fp.write(_FREE_NEXT_STRUCT.pack(self._free_head))
-        self._fp.flush()
-        self._free_head = pid
-        self._write_header()
+        with self._fp_lock:
+            # Link this page in front of the free list.
+            self._fp.seek(pid * self._page_size)
+            self._fp.write(_FREE_NEXT_STRUCT.pack(self._free_head))
+            self._fp.flush()
+            self._free_head = pid
+            self._write_header_unlocked()
 
     # -- internals --------------------------------------------------------
 
     def _extend_to(self, new_num_pages: int) -> None:
-        """Grow the file so it holds at least ``new_num_pages`` pages."""
+        """Grow the file so it holds at least ``new_num_pages`` pages.
+
+        Public lock-acquiring wrapper; called from paths that don't
+        already hold :attr:`_fp_lock`.
+        """
+        if new_num_pages <= self._num_pages:
+            return
+        with self._fp_lock:
+            self._extend_to_unlocked(new_num_pages)
+
+    def _extend_to_unlocked(self, new_num_pages: int) -> None:
+        """Internal grow — caller must hold :attr:`_fp_lock`."""
         if new_num_pages <= self._num_pages:
             return
         assert self._fp is not None
@@ -358,7 +471,7 @@ class Pager:
         self._fp.write(b"\x00" * (gap_pages * self._page_size))
         self._fp.flush()
         self._num_pages = new_num_pages
-        self._write_header()
+        self._write_header_unlocked()
 
     def _protect_header(self, data: bytes) -> bytes:
         """Mask out the header fields in ``data`` (page 0 payload)."""
@@ -368,6 +481,7 @@ class Pager:
         _HEADER_PAGE_SIZE_STRUCT.pack_into(buf, _HDR_PAGE_SIZE_OFF, self._page_size)
         _HEADER_NUM_PAGES_STRUCT.pack_into(buf, _HDR_NUM_PAGES_OFF, self._num_pages)
         _HEADER_FREE_HEAD_STRUCT.pack_into(buf, _HDR_FREE_HEAD_OFF, self._free_head)
+        _HEADER_LAST_LSN_STRUCT.pack_into(buf, _HDR_LAST_LSN_OFF, self._last_lsn)
         return bytes(buf)
 
     def _check_open(self) -> None:

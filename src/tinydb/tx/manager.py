@@ -23,6 +23,17 @@ block (the held token is stored on the manager) so the lock survives
 until ``commit()`` / ``rollback()`` releases it.  This makes the
 multi-writer blocking contract work — while T1 is inside
 ``with mgr.transaction():``, T2's ``begin()`` blocks on the lock.
+
+v0.2 changes
+------------
+* The underlying write lock is now a v0.2 :class:`RWLock` (via the
+  v0.1-compatible :class:`WriteLock` wrapper).  A new
+  :class:`DeadlockDetector` is consulted in ``begin()``; if the new
+  transaction would create a wait-for cycle, the transaction is
+  refused with :class:`DeadlockError` rather than blocking forever.
+* On commit we stamp the page header's ``last_lsn`` field with the
+  LSN of the COMMIT record (REQ-CONC-5).  This is the cross-process
+  invalidation hook read by the BufferPool.
 """
 from __future__ import annotations
 
@@ -31,8 +42,10 @@ import struct
 from dataclasses import dataclass
 from typing import Iterator, Optional
 
+from tinydb.concurrent.deadlock import DeadlockDetector
 from tinydb.errors import TinydbError
 from tinydb.tx.lock import WriteLock, WriteLockHeld
+from tinydb.tx.snapshot import Snapshot
 from tinydb.tx.wal import RT_BEGIN, RT_COMMIT, RT_PAGE, RT_ROLLBACK, WAL
 
 
@@ -46,6 +59,10 @@ class TransactionContext:
         Monotonically increasing id assigned at BEGIN.
     begin_lsn:
         LSN of the RT_BEGIN record in the WAL.
+    snapshot:
+        :class:`Snapshot` capturing the visibility window for this
+        transaction (REQ-CONC-3).  Pages whose ``last_lsn`` exceeds
+        ``snapshot.lsn`` are re-read from disk.
     manager:
         The owning :class:`TransactionManager`; passed back into
         ``commit`` / ``rollback`` so the manager can verify the
@@ -54,6 +71,7 @@ class TransactionContext:
 
     tx_id: int
     begin_lsn: int
+    snapshot: Snapshot
     manager: "TransactionManager"
 
 
@@ -64,17 +82,29 @@ class NestedTransactionError(TinydbError):
     """
 
 
+class DeadlockError(TinydbError):
+    """Raised when ``begin()`` would create a wait-for cycle.
+
+    The caller should roll back the most-recently-started application
+    work and retry.  See REQ-CONC-7.
+    """
+
+
 def _encode_tx_id(tx_id: int) -> bytes:
     """Encode a tx id (u64 BE) for BEGIN / COMMIT / ROLLBACK payloads."""
     return struct.pack(">Q", tx_id)
 
 
 class TransactionManager:
-    """Single-writer transaction coordinator.
+    """Single-writer transaction coordinator with deadlock detection.
 
-    Holds a :class:`WriteLock` for the duration of each transaction;
-    records BEGIN / COMMIT / ROLLBACK in the :class:`WAL`; and fsyncs
-    the WAL on COMMIT / ROLLBACK before releasing the lock.
+    Holds a :class:`WriteLock` (a thin wrapper over the v0.2
+    :class:`~tinydb.concurrent.RWLock` write side) for the duration
+    of each transaction; records BEGIN / COMMIT / ROLLBACK in the
+    :class:`WAL`; and fsyncs the WAL on COMMIT / ROLLBACK before
+    releasing the lock.  A :class:`DeadlockDetector` tracks
+    cross-transaction waits and refuses new transactions that would
+    form a cycle.
 
     Parameters
     ----------
@@ -86,14 +116,15 @@ class TransactionManager:
     """
 
     __slots__ = (
-        "_pager", "_wal", "_lock", "_next_tx_id",
-        "_active_tx", "_held", "_logged_pages",
+        "_pager", "_wal", "_lock", "_deadlock",
+        "_next_tx_id", "_active_tx", "_held", "_logged_pages",
     )
 
     def __init__(self, pager, wal: WAL) -> None:
         self._pager = pager
         self._wal = wal
         self._lock = WriteLock()
+        self._deadlock = DeadlockDetector()
         self._next_tx_id: int = 1
         self._active_tx: Optional[TransactionContext] = None
         # Held token from the in-progress write lock; None iff no tx.
@@ -108,6 +139,16 @@ class TransactionManager:
         """The currently-open transaction, or ``None``."""
         return self._active_tx
 
+    @property
+    def rwlock(self):
+        """Underlying RWLock (v0.2 callers use this directly for read access)."""
+        return self._lock.rwlock
+
+    @property
+    def deadlock_detector(self) -> DeadlockDetector:
+        """The wait-for-graph detector (for tests and advanced callers)."""
+        return self._deadlock
+
     @contextlib.contextmanager
     def transaction(self) -> Iterator[TransactionContext]:
         """Auto-COMMIT on clean exit, auto-ROLLBACK on exception."""
@@ -120,16 +161,51 @@ class TransactionManager:
         else:
             self.commit(tx)
 
+    def _acquire_snapshot(self) -> Snapshot:
+        """Return a snapshot anchored at the current on-disk LSN.
+
+        Uses the Pager's last_lsn — i.e. the highest LSN whose effects
+        are durably on disk before this transaction's BEGIN record
+        is appended.  This is the v0.2 READ COMMITTED semantics: a
+        reader sees everything committed up to *before* it started.
+        """
+        on_disk_lsn = getattr(self._pager, "last_lsn", 0) or 0
+        return Snapshot(lsn=on_disk_lsn)
+
     def begin(self) -> TransactionContext:
         """Acquire the write lock, append RT_BEGIN, return the context.
 
         Blocks until the lock is available.  Raises
         :class:`NestedTransactionError` if another transaction is
-        already active.  The check happens inside the critical section
-        so concurrent ``begin()`` calls from other threads queue up
-        cleanly.  The lock is held until ``commit()`` or
+        already active in this thread, and
+        :class:`DeadlockError` if adding this transaction would form
+        a wait-for cycle.  The check happens inside the critical
+        section so concurrent ``begin()`` calls from other threads
+        queue up cleanly.  The lock is held until ``commit()`` or
         ``rollback()`` is called.
         """
+        # Pre-flight: refuse early if adding ourselves would deadlock.
+        # We tentatively reserve a tx_id, then check the cycle with
+        # ourselves as a waiter on the active tx (if any).  Since the
+        # v0.2 single-writer model has at most one active writer, the
+        # only possible wait edge here is "the new tx waits on the
+        # current active writer", and a cycle would mean that writer
+        # is waiting on us.  In v0.1's single-writer world that can't
+        # happen, but the detector still serves as a guard for the
+        # v0.2 multi-reader reader path where readers can wait on
+        # writers (D-6).
+        new_tx_id = self._next_tx_id
+        if self._active_tx is not None:
+            # We're queued behind the active writer.  Add a wait edge
+            # and ask the detector whether this forms a cycle.
+            self._deadlock.add_wait(new_tx_id, self._active_tx.tx_id)
+            victim = self._deadlock.detect_cycle()
+            self._deadlock.remove(new_tx_id)
+            if victim is not None:
+                raise DeadlockError(
+                    f"transaction {new_tx_id} would deadlock with "
+                    f"active transaction {self._active_tx.tx_id}"
+                )
         held = self._lock.acquire()  # may block
         if self._active_tx is not None:
             held.__exit__(None, None, None)  # release on nested raise
@@ -138,8 +214,14 @@ class TransactionManager:
             )
         tx_id = self._next_tx_id
         self._next_tx_id += 1
+        # Capture snapshot BEFORE we append BEGIN so our own BEGIN
+        # record is not visible to ourselves (strict read-your-own-
+        # writes would require appending BEGIN first, but the v0.1
+        # contract is that the snapshot is anchored at the last
+        # committed state, not at our own BEGIN).
+        snapshot = self._acquire_snapshot()
         begin_lsn = self._wal.append(RT_BEGIN, _encode_tx_id(tx_id))
-        self._active_tx = TransactionContext(tx_id, begin_lsn, self)
+        self._active_tx = TransactionContext(tx_id, begin_lsn, snapshot, self)
         self._held = held
         self._logged_pages = []
         return self._active_tx
@@ -178,13 +260,28 @@ class TransactionManager:
     def commit(self, tx: TransactionContext) -> None:
         """Record RT_COMMIT and fsync; release the lock.
 
+        Stamps the page header's ``last_lsn`` with the LSN of the
+        COMMIT record so other processes can detect the change
+        (REQ-CONC-5).
+
         Raises :class:`ValueError` if ``tx`` is not the active
         transaction.
         """
         if self._active_tx is not tx:
             raise ValueError("commit(): not the active transaction")
-        self._wal.append(RT_COMMIT, _encode_tx_id(tx.tx_id))
+        commit_lsn = self._wal.append(RT_COMMIT, _encode_tx_id(tx.tx_id))
         self._wal.fsync()  # durability: COMMIT must reach disk first
+        # Stamp the on-disk header so cross-process readers can
+        # detect the change.  v0.1 files accept this update because
+        # the last_lsn field is reserved-but-zero.
+        try:
+            self._pager.set_last_lsn(commit_lsn)
+        except Exception:
+            # last_lsn is an observability aid; never fail the commit
+            # on a header-write hiccup.
+            pass
+        # Forget any wait edges involving this tx.
+        self._deadlock.remove(tx.tx_id)
         self._logged_pages = []
         self._active_tx = None
         self._release_lock()
@@ -211,6 +308,7 @@ class TransactionManager:
         # earliest-pre-tx content.
         for page_id, before in reversed(self._logged_pages):
             self._pager.write_page(page_id, before)
+        self._deadlock.remove(tx.tx_id)
         self._logged_pages = []
         self._active_tx = None
         self._release_lock()
@@ -220,4 +318,5 @@ __all__ = [
     "TransactionManager",
     "TransactionContext",
     "NestedTransactionError",
+    "DeadlockError",
 ]

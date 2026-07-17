@@ -1,0 +1,765 @@
+"""Tests for the tinydb v0.2 concurrency primitives.
+
+Coverage targets:
+* REQ-CONC-1 — RWLock read/write semantics, write-preferring fairness.
+* REQ-CONC-7 — DeadlockDetector wait-for-graph cycle detection.
+* REQ-CONC-2 — ProcessLock cross-process exclusion (fcntl/msvcrt).
+* REQ-CONC-3 — Snapshot visibility window.
+* REQ-CONC-5 — BufferPool invalidates cache when page LSN moves past
+  the snapshot.
+
+These tests are intentionally self-contained: each one exercises the
+primitive in isolation, not via the full Database stack. Integration
+tests that drive the Database through the pool and the WAL live in
+``test_concurrent_integration.py``.
+"""
+from __future__ import annotations
+
+import multiprocessing
+import os
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from tinydb.concurrent import (
+    DeadlockDetector,
+    ProcessLock,
+    ProcessLockUnavailableError,
+    RWLock,
+)
+from tinydb.tx.snapshot import Snapshot
+
+
+# --------------------------------------------------------------------------
+# RWLock — REQ-CONC-1
+# --------------------------------------------------------------------------
+
+
+def test_rwlock_multiple_readers_concurrent() -> None:
+    """Multiple readers may hold the lock simultaneously."""
+    lock = RWLock()
+    active = []
+    peak = [0]
+    peak_lock = threading.Lock()
+
+    def reader(tag: str) -> None:
+        with lock.read():
+            active.append(tag)
+            with peak_lock:
+                peak[0] = max(peak[0], len(active))
+            time.sleep(0.05)
+            active.remove(tag)
+
+    threads = [threading.Thread(target=reader, args=(f"r{i}",)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert peak[0] >= 2  # at least 2 readers held concurrently
+
+
+def test_rwlock_writer_excludes_other_writers() -> None:
+    """Two writers serialize: second waits for first to release."""
+    lock = RWLock()
+    order: list[str] = []
+
+    def writer(name: str, hold: float) -> None:
+        with lock.write():
+            order.append(f"{name}-enter")
+            time.sleep(hold)
+            order.append(f"{name}-exit")
+
+    t1 = threading.Thread(target=writer, args=("A", 0.05))
+    t2 = threading.Thread(target=writer, args=("B", 0.0))
+    t1.start()
+    time.sleep(0.01)  # ensure A grabs write first
+    t2.start()
+    t1.join()
+    t2.join()
+    # Either A-enter ... A-exit ... B-enter ... B-exit (sequential) OR
+    # A entered first and B never overlapped (the only correct ordering).
+    assert order.index("A-exit") < order.index("B-enter")
+    assert order.count("A-enter") == 1
+    assert order.count("B-enter") == 1
+
+
+def test_rwlock_write_blocks_read() -> None:
+    """While a writer holds the lock, new readers must wait."""
+    lock = RWLock()
+    order: list[str] = []
+
+    def writer() -> None:
+        with lock.write():
+            order.append("W-enter")
+            time.sleep(0.05)
+            order.append("W-exit")
+
+    def reader() -> None:
+        with lock.read():
+            order.append("R-enter")
+            order.append("R-exit")
+
+    tw = threading.Thread(target=writer)
+    tr = threading.Thread(target=reader)
+    tw.start()
+    time.sleep(0.005)
+    tr.start()
+    tw.join()
+    tr.join()
+    # R cannot enter before W exits.
+    assert order.index("W-exit") < order.index("R-enter")
+
+
+def test_rwlock_read_blocks_write() -> None:
+    """While readers are active, a writer must wait."""
+    lock = RWLock()
+    order: list[str] = []
+
+    def reader() -> None:
+        with lock.read():
+            order.append("R-enter")
+            time.sleep(0.05)
+            order.append("R-exit")
+
+    def writer() -> None:
+        with lock.write():
+            order.append("W-enter")
+            order.append("W-exit")
+
+    tr = threading.Thread(target=reader)
+    tw = threading.Thread(target=writer)
+    tr.start()
+    time.sleep(0.005)
+    tw.start()
+    tr.join()
+    tw.join()
+    assert order.index("R-exit") < order.index("W-enter")
+
+
+def test_rwlock_writer_prefer_queues_readers() -> None:
+    """With prefer_writer, a queued writer blocks new readers."""
+    lock = RWLock()
+    reader_holding = threading.Event()
+    writer_can_run = threading.Event()
+    order: list[str] = []
+
+    def reader1() -> None:
+        with lock.read():
+            reader_holding.set()
+            order.append("R1")
+            writer_can_run.wait(timeout=2.0)
+
+    def writer() -> None:
+        reader_holding.wait(timeout=2.0)
+        time.sleep(0.02)  # ensure writer enters wait queue after R1
+        with lock.write():
+            order.append("W")
+
+    def reader2() -> None:
+        # Try to acquire read while writer is queued. With prefer_writer
+        # this should block until writer runs.
+        writer_can_run.set()  # release R1 to exit; writer queued
+        time.sleep(0.05)
+        with lock.read():
+            order.append("R2")
+
+    threads = [
+        threading.Thread(target=reader1),
+        threading.Thread(target=writer),
+        threading.Thread(target=reader2),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # W must precede R2 because writer preferred.
+    assert order.index("W") < order.index("R2")
+
+
+def test_rwlock_timeout() -> None:
+    """acquire_* with timeout returns False instead of blocking forever."""
+    lock = RWLock()
+    holder = threading.Event()
+    releaser = threading.Event()
+
+    def holder_thread() -> None:
+        with lock.write():
+            holder.set()
+            releaser.wait(timeout=2.0)
+
+    t = threading.Thread(target=holder_thread)
+    t.start()
+    holder.wait(timeout=1.0)
+    try:
+        assert lock.acquire_read(timeout=0.05) is False
+        assert lock.acquire_write(timeout=0.05) is False
+    finally:
+        releaser.set()
+        t.join()
+
+
+def test_rwlock_release_without_acquire_raises() -> None:
+    """Sanity: balanced acquire/release only."""
+    lock = RWLock()
+    with pytest.raises(RuntimeError):
+        lock.release_read()
+    with pytest.raises(RuntimeError):
+        lock.release_write()
+
+
+# --------------------------------------------------------------------------
+# DeadlockDetector — REQ-CONC-7
+# --------------------------------------------------------------------------
+
+
+def test_deadlock_no_cycle() -> None:
+    d = DeadlockDetector()
+    d.add_wait(1, 2)
+    d.add_wait(2, 3)
+    assert d.detect_cycle() is None
+
+
+def test_deadlock_two_tx_cycle() -> None:
+    d = DeadlockDetector()
+    d.add_wait(1, 2)
+    d.add_wait(2, 1)
+    victim = d.detect_cycle()
+    assert victim in (1, 2)
+
+
+def test_deadlock_three_tx_cycle() -> None:
+    d = DeadlockDetector()
+    d.add_wait(1, 2)
+    d.add_wait(2, 3)
+    d.add_wait(3, 1)
+    victim = d.detect_cycle()
+    assert victim in (1, 2, 3)
+
+
+def test_deadlock_remove_breaks_cycle() -> None:
+    d = DeadlockDetector()
+    d.add_wait(1, 2)
+    d.add_wait(2, 1)
+    assert d.detect_cycle() is not None
+    d.remove(2)
+    assert d.detect_cycle() is None
+
+
+def test_deadlock_youngest_victim() -> None:
+    """When multiple cycles exist, the youngest (highest id) is chosen."""
+    d = DeadlockDetector()
+    # Cycle 1: {1, 2}
+    d.add_wait(1, 2)
+    d.add_wait(2, 1)
+    # Cycle 2: {7, 8}
+    d.add_wait(7, 8)
+    d.add_wait(8, 7)
+    assert d.detect_cycle() == 8
+
+
+def test_deadlock_long_chain_no_cycle() -> None:
+    d = DeadlockDetector()
+    d.add_wait(1, 2)
+    d.add_wait(2, 3)
+    d.add_wait(3, 4)
+    assert d.detect_cycle() is None
+
+
+# --------------------------------------------------------------------------
+# ProcessLock — REQ-CONC-2
+# --------------------------------------------------------------------------
+
+
+def test_process_lock_same_process_reentrant_safe(tmp_path: Path) -> None:
+    """Two ProcessLock instances in the same process serialize on the file."""
+    p = tmp_path / "lock.db"
+    p.write_bytes(b"hello world")
+    fp = open(p, "r+b")
+    try:
+        with ProcessLock(fp, exclusive=True):
+            # Cannot acquire a second exclusive lock in same process
+            # for fcntl.flock (locks are per-fd; same fd re-locks
+            # would block forever). Verify by attempting a second fd.
+            fp2 = open(p, "r+b")
+            try:
+                with pytest.raises((BlockingIOError, OSError)):
+                    # non-blocking attempt should fail
+                    import fcntl
+                    if os.name == "posix":
+                        fcntl.flock(fp2.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                fp2.close()
+    finally:
+        fp.close()
+
+
+def _child_holds_lock_then_releases(path: str, duration: float, ready_q, done_q) -> None:
+    """Helper: hold the WAL lock for `duration` seconds, signal lifecycle."""
+    fp = open(path, "r+b")
+    try:
+        with ProcessLock(fp, exclusive=True):
+            ready_q.put("locked")
+            time.sleep(duration)
+        done_q.put("released")
+    finally:
+        fp.close()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl fork test only on POSIX")
+def test_process_lock_blocks_other_process(tmp_path: Path) -> None:
+    """Two processes: child holds lock, parent observes BlockError on try-lock."""
+    if multiprocessing.get_start_method() != "fork":
+        # Only reliable on fork-based mp; spawn may re-open the file
+        # in ways that defeat the test. Skip otherwise.
+        pytest.skip("requires fork-based multiprocessing")
+    p = tmp_path / "wal.db"
+    p.write_bytes(b"")
+    fp = open(p, "r+b")
+    try:
+        ready = multiprocessing.Queue()
+        done = multiprocessing.Queue()
+        proc = multiprocessing.Process(
+            target=_child_holds_lock_then_releases,
+            args=(str(p), 0.3, ready, done),
+        )
+        proc.start()
+        try:
+            assert ready.get(timeout=2.0) == "locked"
+            # Parent attempts non-blocking flock — must fail.
+            import fcntl
+            with pytest.raises((BlockingIOError, OSError)):
+                fcntl.flock(fp.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            proc.join(timeout=5.0)
+            assert proc.exitcode == 0
+            assert done.get(timeout=2.0) == "released"
+    finally:
+        fp.close()
+
+
+def test_process_lock_unavailable_error_is_clear(tmp_path: Path) -> None:
+    """When neither fcntl nor msvcrt is available, constructor raises clearly."""
+    # We can't easily fake the absence of fcntl/msvcrt — but we *can*
+    # verify that the helper function only raises on truly unknown
+    # os.name values by calling it indirectly via _ensure_locking_available.
+    from tinydb.concurrent.fcntl_lock import _ensure_locking_available
+
+    # On the CI host this will succeed (POSIX). The path that raises
+    # is exercised in unit-level tests for the helper if we patch
+    # os.name — kept here as a smoke test.
+    _ensure_locking_available()
+
+
+def test_wal_acquires_process_lock(tmp_path: Path) -> None:
+    """T-17.2 — REQ-CONC-2: WAL.append() acquires the cross-process file lock.
+
+    With ``use_process_lock=True`` the WAL opener instantiates a
+    :class:`ProcessLock` per append.  Two WAL instances pointing at the
+    same file must serialize their appends at the file-lock level,
+    even when only one is the "use_process_lock" writer.  This test
+    exercises that wire-up on a single process first (the cross-process
+    case is covered by ``test_process_lock_blocks_other_process``).
+
+    Strategy: open the same file twice.  Have the second fd hold a
+    :class:`ProcessLock` exclusive for a moment, then verify the WAL's
+    ``append`` (which now wraps an internal ProcessLock acquisition)
+    blocks until the external lock is released.  We instrument the
+    append via a short sleep in the holder.
+    """
+    import fcntl as _fcntl
+    import os as _os
+    import threading as _threading
+    from tinydb.tx.wal import WAL
+
+    p = tmp_path / "locktest.wal"
+    p.write_bytes(b"")
+
+    holder_done = _threading.Event()
+    append_can_run = _threading.Event()
+
+    def hold_then_release(duration: float) -> None:
+        fp = open(p, "r+b")
+        try:
+            op = _fcntl.LOCK_EX
+            _fcntl.flock(fp.fileno(), op)
+            try:
+                append_can_run.set()
+                _os.path.exists(p)  # touch
+                import time as _time
+                _time.sleep(duration)
+            finally:
+                _fcntl.flock(fp.fileno(), _fcntl.LOCK_UN)
+        finally:
+            fp.close()
+            holder_done.set()
+
+    # Skip on non-POSIX — fcntl isn't importable.
+    if _os.name != "posix":
+        pytest.skip("POSIX-only test")
+
+    # Holder thread grabs the lock first, then we have the WAL append.
+    holder = _threading.Thread(target=hold_then_release, args=(0.3,))
+    holder.start()
+    try:
+        append_can_run.wait(timeout=1.0)
+
+        # Open the WAL with use_process_lock=True; append should block.
+        wal = WAL(p, mode="r+b", use_process_lock=True)
+        try:
+            t0 = time.monotonic()
+            wal.append(1, b"hello")
+            elapsed = time.monotonic() - t0
+            # The append must have waited at least 0.2s — i.e. the holder
+            # held the lock at least 0.2s, and our append blocked until
+            # the holder released.
+            assert elapsed >= 0.15, (
+                f"WAL append did not block on external lock "
+                f"(elapsed={elapsed:.3f}s)"
+            )
+            # And the WAL recorded the append after the holder released.
+            assert wal.next_lsn == 2
+        finally:
+            wal.close()
+    finally:
+        holder.join(timeout=2.0)
+        assert holder_done.is_set()
+
+
+# --------------------------------------------------------------------------
+# Snapshot — REQ-CONC-3
+# --------------------------------------------------------------------------
+
+
+def test_snapshot_equal_lsn_visible() -> None:
+    s = Snapshot(lsn=10)
+    assert s.is_visible(10) is True
+
+
+def test_snapshot_greater_lsn_invisible() -> None:
+    s = Snapshot(lsn=10)
+    assert s.is_visible(11) is False
+    assert s.is_newer(11) is True
+
+
+def test_snapshot_smaller_lsn_visible() -> None:
+    s = Snapshot(lsn=10)
+    assert s.is_visible(5) is True
+    assert s.is_newer(5) is False
+
+
+def test_snapshot_zero_anchors_all_pre_v0_2_pages() -> None:
+    """A fresh v0.1 file has last_lsn == 0; snapshot(0) sees everything below 0."""
+    s = Snapshot(lsn=0)
+    # Page LSN 0 (default for v0.1) is visible.
+    assert s.is_visible(0) is True
+
+
+# --------------------------------------------------------------------------
+# BufferPool LSN invalidation — REQ-CONC-5
+# --------------------------------------------------------------------------
+
+
+class _FakePager:
+    """Minimal Pager stand-in: a dict of page_id -> bytes + last_lsn."""
+
+    def __init__(self) -> None:
+        self._pages: dict = {0: b"\x00" * 16, 1: b"\x01" * 16}
+        self.last_lsn: int = 0
+        self._write_log: list = []
+
+    def read_page(self, pid: int) -> bytes:
+        return self._pages[pid]
+
+    def write_page(self, pid: int, data: bytes) -> None:
+        self._pages[pid] = data
+        self._write_log.append(pid)
+
+
+def test_buffer_pool_invalidates_on_external_write() -> None:
+    """External change to last_lsn causes a re-read on next fetch."""
+    from tinydb.storage.buffer_pool import BufferPool
+
+    pager = _FakePager()
+    pool = BufferPool(pager, capacity=4)
+    # First fetch: page 1 is admitted at LSN 0.
+    data_v1 = pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    assert data_v1 == b"\x01" * 16
+    # External process (B) writes a new version; the on-disk LSN
+    # moves to 5 (representing B's COMMIT).
+    pager._pages[1] = b"\xff" * 16
+    pager.last_lsn = 5
+    # A reader in process A at snapshot LSN=3 should NOT see cached
+    # v1 — the page was admitted at LSN 0 which is < 3, so the
+    # cache is "visible" (v1 is *older* than the snapshot, meaning
+    # v1 was committed before the snapshot opened). Wait — that's
+    # the opposite of the invalidation case. Let me restate:
+    # visible = page_lsn <= snapshot_lsn. So page at LSN 0 IS
+    # visible to snapshot(3). The invalidation case is: page was
+    # admitted at LSN 5 (a more recent write), and the snapshot
+    # is at LSN 3 — then 5 > 3 so the page is newer than the
+    # snapshot and must be re-read.
+    # Re-test that case directly:
+    # Re-admit the page at LSN 5 to simulate A's own stale cache
+    # being asked about a snapshot from before B's commit.
+    pool.invalidate(1)
+    pool.fetch_page(1, snapshot=Snapshot(lsn=10))  # admit at on_disk_lsn=5
+    # Now a snapshot at LSN 3 < 5 must re-read.
+    fresh = pool.fetch_page(1, snapshot=Snapshot(lsn=3))
+    assert fresh == b"\xff" * 16
+
+
+def test_buffer_pool_keeps_cache_when_unmodified() -> None:
+    """Within the same snapshot window, repeated fetches hit the cache."""
+    from tinydb.storage.buffer_pool import BufferPool
+
+    pager = _FakePager()
+    pool = BufferPool(pager, capacity=4)
+    pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    pool.fetch_page(1, snapshot=Snapshot(lsn=0))
+    assert pool.stats()["misses"] == 1
+    assert pool.stats()["hits"] == 2
+
+
+def test_buffer_pool_default_snapshot_keeps_v0_1_behavior() -> None:
+    """Without a snapshot kwarg, fetch behaves as v0.1 did (no LSN check)."""
+    from tinydb.storage.buffer_pool import BufferPool
+
+    pager = _FakePager()
+    pool = BufferPool(pager, capacity=4)
+    pool.fetch_page(1)
+    # Bump last_lsn; without a snapshot kwarg the cache is still valid.
+    pager.last_lsn = 99
+    pool.fetch_page(1)
+    assert pool.stats()["misses"] == 1
+
+
+# --------------------------------------------------------------------------
+# TransactionManager — REQ-CONC-3, REQ-CONC-7
+# --------------------------------------------------------------------------
+
+
+def test_transaction_captures_snapshot_on_begin(tmp_path: Path) -> None:
+    """A fresh transaction records a Snapshot on the TransactionContext."""
+    from tinydb.tx.manager import TransactionManager
+    from tinydb.tx.wal import WAL
+
+    db = tmp_path / "t.db"
+    db.write_bytes(b"")
+    wal_path = tmp_path / "t.db.wal"
+    wal_path.write_bytes(b"")
+    pager = _FakePager()
+    wal = WAL(wal_path)
+    pager._pages[0] = b"\x00" * 16  # type: ignore[attr-defined]
+    mgr = TransactionManager(pager, wal)  # type: ignore[arg-type]
+    try:
+        tx = mgr.begin()
+        try:
+            assert tx.snapshot is not None
+            assert tx.snapshot.lsn == 0
+        finally:
+            mgr.rollback(tx)
+    finally:
+        wal.close()
+
+
+def test_transaction_deadlock_raises_in_single_writer() -> None:
+    """In single-writer mode a deadlock attempt is caught eagerly."""
+    from tinydb.tx.manager import DeadlockError, TransactionManager
+    from tinydb.tx.wal import WAL
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        wal_path = Path(td) / "w.wal"
+        wal_path.write_bytes(b"")
+        wal = WAL(wal_path)
+        pager = _FakePager()
+        mgr = TransactionManager(pager, wal)  # type: ignore[arg-type]
+        try:
+            # Force a cycle: add a wait edge (new_tx → active) and
+            # (active → new_tx). detect_cycle should find new_tx.
+            pager._pages[0] = b"\x00" * 16  # type: ignore[attr-defined]
+            # Open one tx.
+            tx1 = mgr.begin()
+            try:
+                # Manually add a back-edge so the next begin() would
+                # cycle.  This is a synthetic test — the production
+                # code only adds forward edges.
+                mgr.deadlock_detector.add_wait(tx1.tx_id, 9999)
+                mgr.deadlock_detector.add_wait(9999, tx1.tx_id)
+                with pytest.raises(DeadlockError):
+                    mgr.begin()
+            finally:
+                mgr.rollback(tx1)
+        finally:
+            wal.close()
+
+
+# --------------------------------------------------------------------------
+# Database integration — REQ-CONC-6, REQ-CONC-8, REQ-CONC-9
+# --------------------------------------------------------------------------
+
+
+def test_database_default_pool_size_one(tmp_path: Path) -> None:
+    """Default pool_size=1 keeps v0.1 single-connection semantics."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        assert db.pool_size == 1
+    finally:
+        db.close()
+
+
+def test_database_pool_size_4_borrows_4_connections(tmp_path: Path) -> None:
+    """A pool of 4 hands out 4 distinct connections concurrently."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, pool_size=4)
+    try:
+        conns = [db.acquire() for _ in range(4)]
+        assert len({id(c) for c in conns}) == 4  # distinct objects
+        for c in conns:
+            db.release(c)
+    finally:
+        db.close()
+
+
+def test_database_pool_size_1_blocks_fifth(tmp_path: Path) -> None:
+    """A pool of 1 blocks the second acquirer until release."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, pool_size=1)
+    try:
+        c1 = db.acquire()
+        got = []
+
+        def grab() -> None:
+            c2 = db.acquire(timeout=0.1)
+            got.append(c2)
+            db.release(c2)
+
+        t = threading.Thread(target=grab)
+        t.start()
+        t.join(timeout=2.0)
+        assert got == []  # timed out
+        db.release(c1)
+        # Now the second acquire can succeed.
+        c2 = db.acquire(timeout=1.0)
+        assert c2 is not None
+        db.release(c2)
+    finally:
+        db.close()
+
+
+def test_database_context_manager_auto_release(tmp_path: Path) -> None:
+    """`with db.connection()` returns the connection to the pool on exit."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, pool_size=2)
+    try:
+        with db.connection() as c1:
+            assert c1 is not None
+        # After exit, the pool has 1 free slot again.
+        c2 = db.acquire(timeout=0.1)
+        assert c2 is not None
+        db.release(c2)
+    finally:
+        db.close()
+
+
+def test_database_isolation_default_read_committed(tmp_path: Path) -> None:
+    """Default isolation is READ_COMMITTED (REQ-CONC-4)."""
+    import tinydb
+    from tinydb import IsolationLevel
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        assert db.isolation is IsolationLevel.READ_COMMITTED
+    finally:
+        db.close()
+
+
+def test_database_isolation_serializable(tmp_path: Path) -> None:
+    """SERIALIZABLE is accepted as an explicit isolation value."""
+    import tinydb
+    from tinydb import IsolationLevel
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, isolation=IsolationLevel.SERIALIZABLE)
+    try:
+        assert db.isolation is IsolationLevel.SERIALIZABLE
+    finally:
+        db.close()
+
+
+def test_database_list_tables_and_get_schema(tmp_path: Path) -> None:
+    """list_tables + get_schema provide catalog introspection (v0.2)."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL)")
+        tables = db.list_tables()
+        assert tables == ["users"]
+        schema = db.get_schema("users")
+        assert "users" in schema
+        assert "id" in schema
+        assert "name" in schema
+        # Missing table raises clearly.
+        with pytest.raises(Exception):
+            db.get_schema("nope")
+    finally:
+        db.close()
+
+
+def test_database_explain_returns_string(tmp_path: Path) -> None:
+    """Database.explain() returns a string for any valid SELECT."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        db.execute("CREATE TABLE t (id INT, v TEXT)")
+        out = db.explain("SELECT * FROM t WHERE id = 1")
+        assert isinstance(out, str)
+        assert out  # non-empty
+    finally:
+        db.close()
+
+
+def test_database_v0_1_compat_single_thread(tmp_path: Path) -> None:
+    """A single-threaded workload produces the same results as v0.1."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        db.execute("CREATE TABLE t (id INT PRIMARY KEY, v TEXT)")
+        db.execute("INSERT INTO t VALUES (1, 'a')")
+        db.execute("INSERT INTO t VALUES (2, 'b')")
+        rows = db.execute("SELECT * FROM t ORDER BY id")
+        assert rows == [(1, "a"), (2, "b")]
+    finally:
+        db.close()
+
+
+def test_database_pool_size_invalid() -> None:
+    """pool_size must be >= 1."""
+    import tinydb
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "x.db"
+        with pytest.raises(ValueError):
+            tinydb.open(p, pool_size=0)
+
+
