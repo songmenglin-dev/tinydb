@@ -520,3 +520,171 @@ def test_transaction_deadlock_raises_in_single_writer() -> None:
                 mgr.rollback(tx1)
         finally:
             wal.close()
+
+
+# --------------------------------------------------------------------------
+# Database integration — REQ-CONC-6, REQ-CONC-8, REQ-CONC-9
+# --------------------------------------------------------------------------
+
+
+def test_database_default_pool_size_one(tmp_path: Path) -> None:
+    """Default pool_size=1 keeps v0.1 single-connection semantics."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        assert db.pool_size == 1
+    finally:
+        db.close()
+
+
+def test_database_pool_size_4_borrows_4_connections(tmp_path: Path) -> None:
+    """A pool of 4 hands out 4 distinct connections concurrently."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, pool_size=4)
+    try:
+        conns = [db.acquire() for _ in range(4)]
+        assert len({id(c) for c in conns}) == 4  # distinct objects
+        for c in conns:
+            db.release(c)
+    finally:
+        db.close()
+
+
+def test_database_pool_size_1_blocks_fifth(tmp_path: Path) -> None:
+    """A pool of 1 blocks the second acquirer until release."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, pool_size=1)
+    try:
+        c1 = db.acquire()
+        got = []
+
+        def grab() -> None:
+            c2 = db.acquire(timeout=0.1)
+            got.append(c2)
+            db.release(c2)
+
+        t = threading.Thread(target=grab)
+        t.start()
+        t.join(timeout=2.0)
+        assert got == []  # timed out
+        db.release(c1)
+        # Now the second acquire can succeed.
+        c2 = db.acquire(timeout=1.0)
+        assert c2 is not None
+        db.release(c2)
+    finally:
+        db.close()
+
+
+def test_database_context_manager_auto_release(tmp_path: Path) -> None:
+    """`with db.connection()` returns the connection to the pool on exit."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, pool_size=2)
+    try:
+        with db.connection() as c1:
+            assert c1 is not None
+        # After exit, the pool has 1 free slot again.
+        c2 = db.acquire(timeout=0.1)
+        assert c2 is not None
+        db.release(c2)
+    finally:
+        db.close()
+
+
+def test_database_isolation_default_read_committed(tmp_path: Path) -> None:
+    """Default isolation is READ_COMMITTED (REQ-CONC-4)."""
+    import tinydb
+    from tinydb import IsolationLevel
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        assert db.isolation is IsolationLevel.READ_COMMITTED
+    finally:
+        db.close()
+
+
+def test_database_isolation_serializable(tmp_path: Path) -> None:
+    """SERIALIZABLE is accepted as an explicit isolation value."""
+    import tinydb
+    from tinydb import IsolationLevel
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p, isolation=IsolationLevel.SERIALIZABLE)
+    try:
+        assert db.isolation is IsolationLevel.SERIALIZABLE
+    finally:
+        db.close()
+
+
+def test_database_list_tables_and_get_schema(tmp_path: Path) -> None:
+    """list_tables + get_schema provide catalog introspection (v0.2)."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL)")
+        tables = db.list_tables()
+        assert tables == ["users"]
+        schema = db.get_schema("users")
+        assert "users" in schema
+        assert "id" in schema
+        assert "name" in schema
+        # Missing table raises clearly.
+        with pytest.raises(Exception):
+            db.get_schema("nope")
+    finally:
+        db.close()
+
+
+def test_database_explain_returns_string(tmp_path: Path) -> None:
+    """Database.explain() returns a string for any valid SELECT."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        db.execute("CREATE TABLE t (id INT, v TEXT)")
+        out = db.explain("SELECT * FROM t WHERE id = 1")
+        assert isinstance(out, str)
+        assert out  # non-empty
+    finally:
+        db.close()
+
+
+def test_database_v0_1_compat_single_thread(tmp_path: Path) -> None:
+    """A single-threaded workload produces the same results as v0.1."""
+    import tinydb
+
+    p = tmp_path / "p.db"
+    db = tinydb.open(p)
+    try:
+        db.execute("CREATE TABLE t (id INT PRIMARY KEY, v TEXT)")
+        db.execute("INSERT INTO t VALUES (1, 'a')")
+        db.execute("INSERT INTO t VALUES (2, 'b')")
+        rows = db.execute("SELECT * FROM t ORDER BY id")
+        assert rows == [(1, "a"), (2, "b")]
+    finally:
+        db.close()
+
+
+def test_database_pool_size_invalid() -> None:
+    """pool_size must be >= 1."""
+    import tinydb
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "x.db"
+        with pytest.raises(ValueError):
+            tinydb.open(p, pool_size=0)
+
+

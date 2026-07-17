@@ -50,6 +50,13 @@ class BufferPool:
     expose the on-disk LSN via :attr:`Pager.last_lsn` (single LSN
     covering the whole file; page-level LSNs are tracked in-memory
     on the cache entry).
+
+    Thread-safety: the v0.2 RWLock (``_lock``) guards every mutating
+    operation so multiple connections in the pool can safely share a
+    single BufferPool instance.  Reads are concurrent; writes are
+    exclusive.  The default pool_size=1 in v0.2 means the lock is
+    uncontended in single-threaded use, so there is no measurable
+    regression (REQ-CONC-9).
     """
 
     def __init__(self, pager: Any, capacity: int = 64) -> None:
@@ -68,6 +75,9 @@ class BufferPool:
         # Counters for stats(). Plain ints — no stdlib Counter overhead.
         self._hits = 0
         self._misses = 0
+        # v0.2 RWLock so concurrent connections can share the cache.
+        from tinydb.concurrent.rwlock import RWLock
+        self._lock = RWLock(prefer_writer=True)
 
     # -- introspection ----------------------------------------------------
 
@@ -94,32 +104,31 @@ class BufferPool:
         next transaction (snapshot LSN < new LSN) re-reads the page
         instead of seeing stale cached bytes.
         """
-        cached = self._cache.get(pid)
-        if cached is not None:
-            if snapshot is not None:
-                page_lsn = self._page_lsn.get(pid, 0)
-                if snapshot.is_newer(page_lsn):
-                    # Stale relative to snapshot — evict and fall through
-                    # to the Pager read.
-                    self._cache.pop(pid, None)
-                    self._page_lsn.pop(pid, None)
-                    self._dirty.discard(pid)
+        with self._lock.read():
+            cached = self._cache.get(pid)
+            if cached is not None:
+                if snapshot is not None:
+                    page_lsn = self._page_lsn.get(pid, 0)
+                    if snapshot.is_newer(page_lsn):
+                        # Stale relative to snapshot — drop and re-read.
+                        self._cache.pop(pid, None)
+                        self._page_lsn.pop(pid, None)
+                        self._dirty.discard(pid)
+                    else:
+                        self._cache.move_to_end(pid)
+                        self._page_lsn.move_to_end(pid)
+                        self._hits += 1
+                        return cached
                 else:
                     self._cache.move_to_end(pid)
-                    self._page_lsn.move_to_end(pid)
                     self._hits += 1
                     return cached
-            else:
-                self._cache.move_to_end(pid)
-                self._hits += 1
-                return cached
-        # Miss — load from Pager.
-        self._misses += 1
-        data = self._pager.read_page(pid)
-        # Stash the on-disk LSN so future snapshot comparisons work.
-        on_disk_lsn = getattr(self._pager, "last_lsn", 0)
-        self._admit(pid, data, on_disk_lsn)
-        return data
+            # Miss — load from Pager.
+            self._misses += 1
+            data = self._pager.read_page(pid)
+            on_disk_lsn = getattr(self._pager, "last_lsn", 0)
+            self._admit(pid, data, on_disk_lsn)
+            return data
 
     def write_page(
         self,
@@ -133,66 +142,55 @@ class BufferPool:
         If ``pid`` is not already cached the page is admitted (which may
         evict the LRU).  The bytes will be written through to the Pager
         on the next :meth:`flush_all`.  ``last_lsn`` records the LSN of
-        the WAL frame that produced ``data``; pass the LSN returned by
-        :meth:`WAL.append` (the WAL's in-memory next_lsn after the
-        append, or the value the caller has tracked separately).
+        the WAL frame that produced ``data``.
         """
-        if pid in self._cache:
-            self._cache[pid] = data
-            self._cache.move_to_end(pid)
-            self._page_lsn[pid] = last_lsn
-            self._page_lsn.move_to_end(pid)
-        else:
-            self._admit(pid, data, last_lsn)
-        self._dirty.add(pid)
+        with self._lock.write():
+            if pid in self._cache:
+                self._cache[pid] = data
+                self._cache.move_to_end(pid)
+                self._page_lsn[pid] = last_lsn
+                self._page_lsn.move_to_end(pid)
+            else:
+                self._admit(pid, data, last_lsn)
+            self._dirty.add(pid)
 
     def mark_dirty(self, pid: int) -> None:
-        """Flag an already-cached page as dirty for the next flush.
-
-        Use this when the caller has mutated the on-disk bytes directly
-        via the underlying Pager (bypassing :meth:`write_page`) and wants
-        the cache to remember the change for the next commit.
-        """
-        if pid not in self._cache:
-            raise ValueError(
-                f"page {pid} is not in the cache; fetch it before mark_dirty"
-            )
-        self._dirty.add(pid)
+        """Flag an already-cached page as dirty for the next flush."""
+        with self._lock.write():
+            if pid not in self._cache:
+                raise ValueError(
+                    f"page {pid} is not in the cache; fetch it before mark_dirty"
+                )
+            self._dirty.add(pid)
 
     def flush_all(self) -> None:
-        """Write every dirty cached page through to the Pager.
-
-        Clears the dirty set as a side-effect; the cached copy is kept
-        (it is now identical to the on-disk copy).
-        """
-        for pid, data in self._cache.items():
-            if pid in self._dirty:
-                self._pager.write_page(pid, data)
-                self._dirty.discard(pid)
+        """Write every dirty cached page through to the Pager."""
+        with self._lock.write():
+            for pid, data in self._cache.items():
+                if pid in self._dirty:
+                    self._pager.write_page(pid, data)
+                    self._dirty.discard(pid)
 
     def invalidate(self, pid: int) -> None:
-        """Drop a single page from the cache.
-
-        Used by tests and the cross-process invalidation path; the
-        next :meth:`fetch_page` will read through to the Pager.
-        """
-        self._cache.pop(pid, None)
-        self._page_lsn.pop(pid, None)
-        self._dirty.discard(pid)
+        """Drop a single page from the cache."""
+        with self._lock.write():
+            self._cache.pop(pid, None)
+            self._page_lsn.pop(pid, None)
+            self._dirty.discard(pid)
 
     # -- IMPROVE ----------------------------------------------------------
 
     def stats(self) -> Dict[str, int]:
         """Snapshot of hit/miss counters since construction."""
-        return {"hits": self._hits, "misses": self._misses}
+        with self._lock.read():
+            return {"hits": self._hits, "misses": self._misses}
 
     # -- internals --------------------------------------------------------
 
     def _admit(self, pid: int, data: bytes, last_lsn: int = 0) -> None:
         """Insert ``pid`` at the MRU end, evicting LRU when full.
 
-        Eviction flushes dirty pages first so we never drop a dirty
-        write on the floor.
+        Caller must hold the write lock.
         """
         if len(self._cache) >= self._capacity:
             evicted_pid, evicted_data = self._cache.popitem(last=False)
