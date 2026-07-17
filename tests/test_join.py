@@ -985,3 +985,47 @@ class TestNestedLoopJoinOperator:
         assert len(bob_rows) == 1
         assert bob_rows[0][1] is None
         db.close()
+
+
+class TestNestedJoinOffset:
+    """Regression: nested-JOIN offset undercount when a trailing column
+    name-collision forces the collision into a qualified ``alias.col``
+    key — the old ``max(bare positions) + 1`` formula undercounted the
+    physical width of the left subtree and the right side then landed
+    on overlapping slots, silently dropping all rows.
+    """
+
+    def test_nested_join_with_trailing_column_collision(self, tmp_db_path) -> None:
+        """3-table join where b's last column ``m`` collides with a.m.
+
+        The buggy offset formula computes ``offset = max(bare positions)
+        + 1 = 2`` instead of the true physical width ``3``, so ``c.bid``
+        lands on position 3 (which is actually ``b.m``) and the ON
+        predicate ``b.aid = c.bid`` evaluates ``b.aid`` against ``b.m`` —
+        the rows never match, returning ``[]``.
+        """
+        from tinydb import open as tdb_open
+        db = tdb_open(str(tmp_db_path))
+        # a.m is the colliding name; b.m is the inner-table trailing
+        # collision (position 3 in the combined (a JOIN b) row).
+        db.execute("CREATE TABLE a (id INT PRIMARY KEY, m INT)")
+        db.execute("CREATE TABLE b (aid INT PRIMARY KEY, m INT)")
+        db.execute("CREATE TABLE c (bid INT PRIMARY KEY, val TEXT)")
+        # b.aid matches a.id so the INNER join produces rows.  b.m
+        # is deliberately chosen NOT to equal b.aid, so the buggy
+        # mis-resolution (c.bid read as b.m) cannot accidentally
+        # match when the outer ON runs.
+        db.execute("INSERT INTO a VALUES (1, 100), (2, 200)")
+        db.execute("INSERT INTO b VALUES (1, 99), (2, 199)")
+        db.execute("INSERT INTO c VALUES (1, 'x'), (2, 'y')")
+        rows = db.execute(
+            "SELECT a.id, b.m, c.val FROM a "
+            "JOIN b ON a.id = b.aid "
+            "JOIN c ON b.aid = c.bid"
+        )
+        assert len(rows) == 2
+        for row in rows:
+            assert row[0] in (1, 2)
+            assert row[1] in (99, 199)
+            assert row[2] in ("x", "y")
+        db.close()

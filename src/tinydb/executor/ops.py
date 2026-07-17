@@ -200,10 +200,22 @@ class Project(Plan):
         for row in self.src.open(ctx):
             out: list = []
             for i, col_name in enumerate(self.columns):
-                if col_name in n2i:
+                # Prefer a qualified lookup when the SELECT item carries
+                # a table/alias — bare-name resolution would otherwise
+                # return the leftmost side on a name collision
+                # (e.g. ``SELECT b.m`` with ``a JOIN b`` both having
+                # ``m``).
+                item = self.items[i] if self.items and i < len(self.items) else None
+                if (
+                    item is not None
+                    and getattr(item, "table", None) is not None
+                    and f"{item.table}.{col_name}" in n2i
+                ):
+                    out.append(row[n2i[f"{item.table}.{col_name}"]])
+                elif col_name in n2i:
                     out.append(row[n2i[col_name]])
-                elif self.items and i < len(self.items):
-                    out.append(eval_expr(self.items[i], row, n2i))  # type: ignore[arg-type]
+                elif item is not None:
+                    out.append(eval_expr(item, row, n2i))  # type: ignore[arg-type]
                 else:
                     raise NotImplementedError(
                         f"project column {col_name!r} has no source item"

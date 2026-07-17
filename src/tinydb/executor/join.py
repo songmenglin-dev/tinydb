@@ -77,8 +77,15 @@ def row_n2i_for_plan(plan, ctx, alias: Optional[str] = None) -> dict:
     :class:`IndexScan` returns that table's ``name_to_idx`` plus any
     ``{alias}.{col}`` entries when an alias is supplied.  For a Join it
     recursively merges the left and right row layouts, shifting the
-    right side by ``max(left bare positions) + 1`` so each side's
-    local column position lands at its actual row slot.
+    right side by ``max(left positions) + 1`` — the true physical width
+    of the left subtree — so each side's local column position lands
+    at its actual row slot.
+
+    The earlier ``max(bare positions) + 1`` formula undercounted when a
+    nested join's inner-table trailing column collided with an outer
+    column: the collision was recorded only as a qualified
+    ``alias.col`` key, leaving the bare set short by one position and
+    the outer right side then landing on an overlapping slot.
 
     Other wrappers (:class:`Filter`, :class:`Project`, :class:`Sort`,
     :class:`Limit`) are unwrapped until a leaf or join is reached.  A
@@ -101,10 +108,13 @@ def row_n2i_for_plan(plan, ctx, alias: Optional[str] = None) -> dict:
     if isinstance(plan, (NestedLoopJoin, IndexedNestedLoopJoin)):
         left_n2i = row_n2i_for_plan(plan.left, ctx, alias=plan.alias_left)
         right_n2i = row_n2i_for_plan(plan.right, ctx, alias=plan.alias_right)
-        # Offset = next free slot after every bare-name position in
-        # left (qualified entries share the bare position).
-        left_bare_pos = [v for k, v in left_n2i.items() if "." not in k]
-        offset = (max(left_bare_pos) + 1) if left_bare_pos else 0
+        # Physical width of the left subtree = max position + 1,
+        # counting BOTH bare and qualified entries.  Qualified entries
+        # always sit at their bare position (or extend past it when
+        # the bare was shadowed by a left-side winner), so taking the
+        # max over all keys gives the true width without missing
+        # collision-induced extensions.
+        offset = (max(left_n2i.values()) + 1) if left_n2i else 0
         out = dict(left_n2i)
         for col, idx in right_n2i.items():
             shifted = idx + offset
@@ -227,7 +237,6 @@ class IndexedNestedLoopJoin(Plan):
         return self.left.table
 
     def open(self, ctx) -> Iterator[tuple]:
-        left_n2i = ctx.name_to_idx_for(self.left.table)
         right_n2i = ctx.name_to_idx_for(self.right.table)
         right_size = len(right_n2i)
         if ctx.indexer is None:
@@ -240,15 +249,20 @@ class IndexedNestedLoopJoin(Plan):
             [c.name for c in right_meta.columns].index(self.right_key_column)
         ].tag
         lookup = IndexLookup(ctx.indexer, idx_obj, key_tag)
-        left_key_idx, right_key_idx = _extract_join_keys(
-            self.on_expr, left_n2i, right_n2i,
-            self.alias_left, self.alias_right,
+        # When the driving (left) side is itself a JOIN (nested case),
+        # ``ctx.name_to_idx_for(left.table)`` only sees the leftmost
+        # leaf's columns and is therefore too narrow to resolve keys
+        # on a non-leftmost leaf (``b.aid`` for ``a JOIN b``).  Use the
+        # recursive ``row_n2i_for_plan`` so key extraction and ON
+        # evaluation work against the full nested layout.
+        full_left_n2i = row_n2i_for_plan(self.left, ctx, alias=self.left_key_alias)
+        merged_n2i = row_n2i_for_plan(self, ctx)
+        left_key_idx, right_key_idx = _extract_join_keys_nested(
+            self.on_expr, full_left_n2i, right_n2i,
+            self.left_key_alias, self.alias_right,
         )
         if left_key_idx is None or right_key_idx is None:
             return
-        merged_n2i = merge_n2i(
-            left_n2i, right_n2i, self.alias_left, self.alias_right,
-        )
         for left_row in self.left.open(ctx):
             key = left_row[left_key_idx]
             if key is None:
@@ -292,6 +306,12 @@ def _extract_join_keys(
     ``left.col = right.col`` case.  Returns ``(None, None)`` for any
     other shape (composite / OR / range / etc.) so the caller falls
     back to NLJ.
+
+    Both ``left_n2i`` and ``right_n2i`` are expected to be plain
+    ``{column_name: position}`` maps for SINGLE-TABLE sides.  Callers
+    with a nested left side (a JOIN) must use
+    :func:`_extract_join_keys_nested` so the driving row's full width
+    is used for the left index.
     """
     if not isinstance(on_expr, BinaryOp) or on_expr.op != "=":
         return (None, None)
@@ -320,6 +340,57 @@ def _extract_join_keys(
         return None
     l = _side_idx(left_ref)
     r = _side_idx(right_ref)
+    if l is None or r is None:
+        return (None, None)
+    return (l, r)
+
+
+def _extract_join_keys_nested(
+    on_expr: Optional[Expr],
+    full_left_n2i: dict,
+    right_n2i: dict,
+    alias_left: Optional[str],
+    alias_right: Optional[str],
+) -> tuple:
+    """Like :func:`_extract_join_keys` but for a nested driving side.
+
+    ``full_left_n2i`` is the recursive map returned by
+    :func:`row_n2i_for_plan` on the LEFT subplan; it carries every
+    bare and qualified column position across the LEFT's nested
+    layout.  The right key index is shifted by ``len(full_left_n2i)``
+    because nested INLJs only emit a single combined ``combined =
+    left_row + right_row`` at the parent level — but for the index
+    lookup we want ``left_row``-local positions on the left side and
+    RIGHT-leaf-local positions on the right side; the shift puts the
+    right index in terms of the COMBINED row, which is where
+    :func:`eval_expr` will read it.
+    """
+    if not isinstance(on_expr, BinaryOp) or on_expr.op != "=":
+        return (None, None)
+    left_ref = on_expr.left
+    right_ref = on_expr.right
+    if not isinstance(left_ref, ColumnRef) or not isinstance(right_ref, ColumnRef):
+        return (None, None)
+
+    def _left_idx(ref: ColumnRef) -> Optional[int]:
+        # Try the qualified form first (works whether the driving side
+        # is a leaf or a nested join); then fall back to the bare name.
+        if ref.table is not None:
+            key = f"{ref.table}.{ref.name}"
+            if key in full_left_n2i:
+                return full_left_n2i[key]
+        return full_left_n2i.get(ref.name)
+
+    def _right_idx(ref: ColumnRef) -> Optional[int]:
+        if ref.table is not None and ref.table == alias_right:
+            return right_n2i[ref.name] + len(full_left_n2i)
+        # Bare name — only safe when unambiguous on the right side.
+        if ref.name in right_n2i:
+            return right_n2i[ref.name] + len(full_left_n2i)
+        return None
+
+    l = _left_idx(left_ref)
+    r = _right_idx(right_ref)
     if l is None or r is None:
         return (None, None)
     return (l, r)
