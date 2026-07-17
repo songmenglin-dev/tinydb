@@ -28,15 +28,12 @@ both sides.  This is built by :func:`merge_n2i` so column refs like
 
 from __future__ import annotations
 
-from typing import Any, Iterator, Optional, Sequence
+from typing import Iterator, Optional, Sequence
 
 from tinydb.executor.eval_expr import eval_expr
 from tinydb.executor.index_scan import IndexLookup
-from tinydb.executor.logical import JoinNode, LogicalPlan, TableRef_
 from tinydb.executor.ops import Plan
-from tinydb.index.manager import IndexManager
 from tinydb.sql.ast import BinaryOp, ColumnRef, Expr
-from tinydb.storage.catalog import Catalog
 
 
 def merge_n2i(left_n2i: dict, right_n2i: dict, alias_left: Optional[str],

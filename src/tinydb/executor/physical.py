@@ -12,7 +12,10 @@ REQ coverage
 
 Split out of :mod:`tinydb.executor.planner` in T-12.1; the planner
 becomes a thin entry point that calls ``emit_logical`` then
-``emit_physical``.
+``emit_physical``.  Single-table WHERE/project/sort/limit wrapping
+still lives in :mod:`tinydb.executor.planner` so this module only
+deals with the JOIN-aware projection (deduplicating USING columns,
+walking all FROM tables for WHERE validation, etc.).
 """
 
 from __future__ import annotations
@@ -20,32 +23,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from tinydb.executor.index_plan import extract_indexable
 from tinydb.executor.join import (
     IndexedNestedLoopJoin,
     NestedLoopJoin,
 )
-from tinydb.executor.logical import JoinNode, LogicalPlan, TableRef_
+from tinydb.executor.logical import JoinNode, TableRef_
 from tinydb.executor.ops import (
     Filter,
-    IndexScan,
+    Limit as LimitPlan,
     Plan,
     Project,
     SeqScan,
-)
-from tinydb.executor.ops import (
-    Aggregate as AggregatePlan,
-)
-from tinydb.executor.ops import (
-    Limit as LimitPlan,
-)
-from tinydb.executor.ops import (
     Sort as SortPlan,
 )
 from tinydb.executor.planner import (
     UnknownColumnError,
-    UnknownTableError,
-    _try_index_plan,
+    _require_table,
+    _walk_expr,
     meta_column_names,
 )
 from tinydb.index.manager import IndexManager
@@ -54,14 +48,16 @@ from tinydb.sql.ast import (
     BinaryOp,
     ColumnRef,
     Expr,
+    Literal,
     Select,
     Star,
+    TypedLiteral,
 )
-from tinydb.storage.catalog import Catalog, TableMeta
+from tinydb.storage.catalog import Catalog
 
 
 def emit_physical(
-    logical: LogicalPlan,
+    logical,
     catalog: Catalog,
     indexer: Optional[IndexManager] = None,
 ) -> Plan:
@@ -128,7 +124,7 @@ def _emit_join(
     )
 
 
-def _alias_for(node: LogicalPlan) -> Optional[str]:
+def _alias_for(node) -> Optional[str]:
     if isinstance(node, TableRef_):
         # When the SQL doesn't alias a table, fall back to its bare
         # name so qualified refs like ``t1.id`` still resolve (the
@@ -209,68 +205,7 @@ class _IndexJoinPlan:  # noqa: F821
     left_alias: Optional[str]
 
 
-# --- single-table WHERE + plan wrapping -------------------------------
-
-
-def build_physical_select(
-    stmt: Select,
-    catalog: Catalog,
-    indexer: Optional[IndexManager],
-    logical: LogicalPlan,
-) -> Plan:
-    """Wrap a single-table physical plan with WHERE/Project/Sort/Limit.
-
-    Used by :func:`tinydb.executor.planner.plan` for the v0.1 single-
-    table code path; JOIN plans are emitted directly without this
-    helper.
-    """
-    from tinydb.sql.ast import Select as SelectStmt
-    if not isinstance(logical, TableRef_):
-        # JOINs have already been planned; the planner just wraps with
-        # WHERE/Project/Sort/Limit around the join result.
-        return _wrap_with_select_clauses(
-            emit_physical(logical, catalog, indexer),
-            stmt,
-            catalog,
-        )
-    meta = _require_table(logical.table, catalog)
-    src: Plan = _emit_tableref(logical, catalog)
-    if stmt.where is not None:
-        _validate_expr_columns(stmt.where, meta)
-        index_plan = _try_index_plan(stmt.where, meta, indexer)
-        src = Filter(src=src, predicate=stmt.where)
-        if index_plan is not None:
-            src = Filter(src=index_plan, predicate=stmt.where)
-    # Aggregate / Project
-    agg_pairs: tuple = tuple(
-        (c.func, c.column) for c in stmt.columns if isinstance(c, Aggregate)
-    )
-    if agg_pairs or stmt.group_by:
-        src = AggregatePlan(
-            src=src,
-            aggregates=agg_pairs,
-            keys=tuple(stmt.group_by),
-        )
-    else:
-        src = Project(
-            src=src,
-            columns=_project_columns(stmt, meta),
-            items=tuple(stmt.columns),
-        )
-    if stmt.order_by:
-        keys = [(ob.column, ob.descending) for ob in stmt.order_by]
-        known = set(meta_column_names(meta))
-        for col, _ in keys:
-            if col not in known:
-                raise UnknownColumnError(col)
-        src = SortPlan(src=src, keys=keys)
-    if stmt.limit is not None or stmt.offset:
-        src = LimitPlan(
-            src=src,
-            limit=stmt.limit if stmt.limit is not None else 0,
-            offset=stmt.offset or 0,
-        )
-    return src
+# --- JOIN-aware WHERE / projection / ordering wrapping -----------------
 
 
 def _wrap_with_select_clauses(
@@ -316,15 +251,6 @@ def _validate_join_where(expr: Expr, stmt: Select, catalog: Catalog) -> None:
     _walk_expr(expr, known)
 
 
-def _walk_expr(expr, known: set) -> None:
-    if isinstance(expr, ColumnRef):
-        if expr.name not in known:
-            raise UnknownColumnError(expr.name)
-    elif isinstance(expr, BinaryOp):
-        _walk_expr(expr.left, known)
-        _walk_expr(expr.right, known)
-
-
 def _all_tables_in_from(from_ref) -> list:
     from tinydb.sql.ast import Join as AstJoin, Table
     out: list = []
@@ -345,7 +271,6 @@ def _join_projection_columns(stmt: Select, catalog: Catalog) -> list:
     columns.  For explicit ColumnRef items, return the names as-is
     (the executor looks them up via the merged name_to_idx).
     """
-    from tinydb.sql.ast import Aggregate, Literal, Star, TypedLiteral
     out: list = []
     seen: set = set()
     using_cols: list = []
@@ -410,64 +335,4 @@ def _collect_using(node, out: list) -> None:
         _collect_using(node.right, out)
 
 
-# --- helpers re-used from planner.py -----------------------------------
-
-
-def _require_table(name: str, catalog: Catalog) -> TableMeta:
-    try:
-        return catalog.get_table(name)
-    except KeyError as exc:
-        raise UnknownTableError(name) from exc
-
-
-def _project_columns(stmt: Select, meta: TableMeta) -> list:
-    """Single-table SELECT projection (v0.1 path)."""
-    all_names = meta_column_names(meta)
-    if len(stmt.columns) == 1 and isinstance(stmt.columns[0], Star):
-        return list(all_names)
-    out: list = []
-    for item in stmt.columns:
-        if isinstance(item, Star):
-            for c in all_names:
-                if c not in out:
-                    out.append(c)
-        elif isinstance(item, ColumnRef):
-            if item.name not in all_names:
-                raise UnknownColumnError(item.name)
-            if item.name not in out:
-                out.append(item.name)
-        elif isinstance(item, Aggregate):
-            out.append(f"{item.func}({item.column})")
-        elif isinstance(item, Literal):
-            out.append(f"L:{item.value!r}")
-        elif isinstance(item, TypedLiteral):
-            out.append(f"L[{item.tag.name}]:{item.value!r}")
-        else:
-            out.append(type(item).__name__)
-    return out
-
-
-def _validate_expr_columns(expr: Expr, meta: TableMeta) -> None:
-    """Walk expr; raise UnknownColumnError on unknown ColumnRef."""
-    _walk_expr_single(expr, set(meta_column_names(meta)))
-
-
-def _walk_expr_single(expr, known: set) -> None:
-    if isinstance(expr, ColumnRef):
-        if expr.name not in known:
-            raise UnknownColumnError(expr.name)
-    elif isinstance(expr, BinaryOp):
-        _walk_expr_single(expr.left, known)
-        _walk_expr_single(expr.right, known)
-
-
-def _try_index_plan(predicate, meta: TableMeta, indexer: Optional[IndexManager]):
-    """Forward to planner helper (avoid circular import)."""
-    from tinydb.executor.planner import _try_index_plan as _impl
-    return _impl(predicate, meta, indexer)
-
-
-__all__ = [
-    "build_physical_select",
-    "emit_physical",
-]
+__all__ = ["emit_physical"]
