@@ -232,15 +232,17 @@ def _plan_select(
 
         return src
 
-    # JOIN path: emit logical, then physical, then wrap with WHERE/
-    # Project/Sort/Limit.
+    # JOIN path: emit logical, run through the new class-based
+    # PhysicalPlanner (T-12.6), then wrap with WHERE/Project/Sort/Limit.
     from tinydb.executor.logical import emit_logical
-    from tinydb.executor.physical import (
-        _wrap_with_select_clauses as _wrap,
-        emit_physical,
-    )
+    from tinydb.executor.physical import _wrap_with_select_clauses as _wrap
     logical = emit_logical(stmt)
-    base = emit_physical(logical, catalog, indexer)
+    phys_planner = PhysicalPlanner(catalog, indexer)
+    physical = phys_planner.plan(logical)
+    # ``PhysicalPlan.steps`` carries the root node; v0.2 SELECTs only
+    # produce a single step.  Unwrap for ``_wrap`` to add the SELECT-
+    # trailing clauses around the JOIN tree.
+    base = physical.steps[0]
     return _wrap(base, stmt, catalog)
 
 
