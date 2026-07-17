@@ -334,16 +334,24 @@ def emit_logical(stmt: Select) -> LogicalPlan:
     (REQ-JOIN-8).
 
     Alias resolution and bare-table detection happen via
-    :func:`validate_columns` so any column reference in WHERE / ON / etc.
-    is checked once at plan-build time.
+    :func:`validate_columns` so any column reference in WHERE / ON /
+    the SELECT list is checked once at plan-build time (REQ-JOIN-8).
     """
     alias_map = build_alias_map(stmt.from_)
-    # Validate columns against the alias map so ambiguous / unknown
-    # aliases raise before any plan node is built.
+    is_join = not isinstance(stmt.from_, Table)
+    # Validate WHERE / ON columns so ambiguous / unknown aliases
+    # raise before any plan node is built.
     if stmt.where is not None:
         validate_columns(stmt.where, alias_map, stmt.from_)
-    # Note: SELECT-list column refs are validated at projection time;
-    # the executor owns the "is this column in the result" question.
+    # T-12.5: SELECT-list bare references that exist in more than one
+    # joined table must raise AmbiguousColumnError; this is the
+    # user-facing REQ-JOIN-8 hook.
+    if is_join:
+        for item in stmt.columns:
+            if isinstance(item, ColumnRef):
+                validate_columns(item, alias_map, stmt.from_)
+    # Note: ORDER BY / GROUP BY bare refs are still validated in the
+    # physical planner when the catalog is available.
     return _emit_from(stmt.from_, alias_map)
 
 

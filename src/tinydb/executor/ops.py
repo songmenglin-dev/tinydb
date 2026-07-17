@@ -149,8 +149,20 @@ class Filter(Plan):
 
     def open(self, ctx: "Executor") -> Iterator[Row]:
         from tinydb.executor.eval_expr import eval_expr
+        from tinydb.executor.join import (
+            IndexedNestedLoopJoin,
+            NestedLoopJoin,
+            row_n2i_for_plan,
+        )
 
-        n2i = ctx.name_to_idx_for(self.table)
+        # When the upstream is a JOIN, predicate evaluation needs the
+        # merged name_to_idx (both sides' columns plus qualified
+        # ``alias.col`` entries); single-table plans keep the v0.1
+        # fast path.
+        if isinstance(self.src, (NestedLoopJoin, IndexedNestedLoopJoin)):
+            n2i = row_n2i_for_plan(self.src, ctx)
+        else:
+            n2i = ctx.name_to_idx_for(self.table)
         for row in self.src.open(ctx):
             v = eval_expr(self.predicate, row, n2i)  # type: ignore[arg-type]
             if v:
@@ -180,7 +192,11 @@ class Project(Plan):
     def open(self, ctx: "Executor") -> Iterator[Row]:
         from tinydb.executor.eval_expr import eval_expr
 
-        n2i = ctx.name_to_idx_for(self.table)
+        # When the upstream is a JOIN, the row layout is left_row+right_row
+        # and the project's column list may refer to either side.  We
+        # build a merged name_to_idx that covers both halves of the
+        # upstream's table pair (only one extra resolve per column).
+        n2i = _project_name_to_idx(ctx, self)
         for row in self.src.open(ctx):
             out: list = []
             for i, col_name in enumerate(self.columns):
@@ -193,6 +209,31 @@ class Project(Plan):
                         f"project column {col_name!r} has no source item"
                     )
             yield tuple(out)
+
+
+def _project_name_to_idx(ctx, project) -> dict:
+    """Return the merged column-index map a :class:`Project` should use.
+
+    Single-table plans get the table's bare ``name_to_idx``.  Plans that
+    sit on top of a JOIN tree (direct or wrapped through Filter/Sort)
+    get a recursive merge that walks nested joins (T-12.5) so 3-table
+    queries resolve qualified refs correctly.
+    """
+    src = project.src
+    from tinydb.executor.join import (
+        IndexedNestedLoopJoin,
+        NestedLoopJoin,
+        row_n2i_for_plan,
+    )
+    # Walk through Filter / Sort / Limit wrappers to find the join.
+    candidate = src
+    while hasattr(candidate, "src") and not isinstance(
+        candidate, (NestedLoopJoin, IndexedNestedLoopJoin)
+    ):
+        candidate = candidate.src
+    if isinstance(candidate, (NestedLoopJoin, IndexedNestedLoopJoin)):
+        return row_n2i_for_plan(candidate, ctx)
+    return ctx.name_to_idx_for(project.table)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -214,6 +255,11 @@ class Sort(Plan):
 
     def open(self, ctx: "Executor") -> Iterator[Row]:
         from tinydb.executor.aggregate import Aggregate as AggregatePlan
+        from tinydb.executor.join import (
+            IndexedNestedLoopJoin,
+            NestedLoopJoin,
+            row_n2i_for_plan,
+        )
         from tinydb.executor.planner import UnknownColumnError
 
         rows = list(self.src.open(ctx))
@@ -245,6 +291,12 @@ class Sort(Plan):
                 post_proj_indices = tuple(base_idx[c] for c in proj_labels)
             else:
                 col_idx = proj_idx
+        elif isinstance(self.src, (NestedLoopJoin, IndexedNestedLoopJoin)):
+            # T-12.5: SORT over a JOIN tree must use the merged
+            # name_to_idx so ORDER BY can see columns from both sides.
+            col_idx = row_n2i_for_plan(self.src, ctx)
+            # Rows here are pre-projection merged tuples already.
+            post_proj_indices = None
         else:
             col_idx = ctx.name_to_idx_for(self.table)
 

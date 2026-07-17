@@ -598,10 +598,13 @@ class TestNestedLoopJoinExecution:
         )
         db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
         db.execute("INSERT INTO orders VALUES (10, 1, 100), (20, 1, 200)")
+        # DESC puts NULLs last in the implementation's ordering —
+        # SQL doesn't guarantee NULL placement, so we don't need
+        # ``o.total IS NULL`` (which would require IS NULL grammar).
         rows = db.execute(
             "SELECT u.id, o.total FROM users u "
             "LEFT JOIN orders o ON u.id = o.user_id "
-            "ORDER BY o.total IS NULL, o.total"
+            "ORDER BY o.total DESC"
         )
         # 3 rows: id=1 twice + id=2 once (NULL total)
         assert len(rows) == 3
@@ -720,6 +723,80 @@ class TestIndexedNestedLoopJoin:
         # falls back to NLJ the assertion softens to NLJ.
         from tinydb.executor.join import IndexedNestedLoopJoin, NestedLoopJoin
         assert isinstance(plan, (IndexedNestedLoopJoin, NestedLoopJoin))
+        db.close()
+
+
+class TestProjectDedupAndFilter:
+    """T-12.5 — USING dedup, JOIN+WHERE combo, ambiguous column errors."""
+
+    def test_project_dedup_using_cols(self, tmp_db_path) -> None:
+        """SELECT * with USING only emits the shared column once."""
+        from tinydb import open as tdb_open
+        db = tdb_open(str(tmp_db_path))
+        db.execute("CREATE TABLE t1 (id INT PRIMARY KEY, name TEXT, only_t1 TEXT)")
+        db.execute("CREATE TABLE t2 (id INT PRIMARY KEY, name TEXT, only_t2 TEXT)")
+        # Both sides share id=1 and name='a' so the USING match lands.
+        db.execute("INSERT INTO t1 VALUES (1, 'a', 'x1'), (2, 'b', 'x2')")
+        db.execute("INSERT INTO t2 VALUES (1, 'a', 'y1'), (3, 'z', 'y2')")
+        # Using SELECT * the projection must dedup `id` and `name`.
+        rows = db.execute("SELECT * FROM t1 JOIN t2 USING (id, name)")
+        assert len(rows) == 1
+        row = rows[0]
+        # id appears once
+        ids = [v for v in row if v == 1]
+        assert len(ids) == 1, f"id should appear once, row={row}"
+        # name appears once
+        names = [v for v in row if v == 'a']
+        assert len(names) == 1, f"name should appear once, row={row}"
+        # Each per-side exclusive column is still present once.
+        assert row.count('x1') == 1 and row.count('y1') == 1
+        db.close()
+
+    def test_join_then_where_filter(self, tmp_db_path) -> None:
+        """WHERE applies AFTER JOIN (REQ-JOIN-9)."""
+        from tinydb import open as tdb_open
+        db = tdb_open(str(tmp_db_path))
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')")
+        db.execute(
+            "INSERT INTO orders VALUES "
+            "(10, 1, 50), (20, 1, 250), (30, 2, 30), (40, 3, 500)"
+        )
+        # First compute the join product to spot-check the semantic.
+        joined = db.execute(
+            "SELECT u.name, o.total FROM users u "
+            "JOIN orders o ON u.id = o.user_id"
+        )
+        assert len(joined) == 4
+        # Filter on total > 100: only Alice's 250 and Carol's 500 qualify.
+        filtered = db.execute(
+            "SELECT u.name, o.total FROM users u "
+            "JOIN orders o ON u.id = o.user_id "
+            "WHERE o.total > 100"
+        )
+        assert len(filtered) == 2
+        names = sorted(r[0] for r in filtered)
+        assert names == ['Alice', 'Carol']
+        # And the order matches the underlying row (no order_by).
+        db.close()
+
+    def test_ambiguous_column_in_select_errors(self, tmp_db_path) -> None:
+        """A bare column appearing in both tables raises AmbiguousColumnError."""
+        from tinydb import open as tdb_open
+        from tinydb.executor.logical import AmbiguousColumnError
+        db = tdb_open(str(tmp_db_path))
+        db.execute("CREATE TABLE users (id INT, name TEXT)")
+        db.execute("CREATE TABLE orders (id INT, name TEXT)")
+        db.execute("INSERT INTO users VALUES (1, 'alice')")
+        db.execute("INSERT INTO orders VALUES (10, 'foo')")
+        # Unqualified `name` exists in both tables → ambiguous.
+        with pytest.raises(AmbiguousColumnError):
+            db.execute(
+                "SELECT name FROM users JOIN orders ON users.id = orders.id"
+            )
         db.close()
 
 

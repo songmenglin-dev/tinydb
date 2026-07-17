@@ -70,6 +70,54 @@ def merge_n2i(left_n2i: dict, right_n2i: dict, alias_left: Optional[str],
     return out
 
 
+def row_n2i_for_plan(plan, ctx, alias: Optional[str] = None) -> dict:
+    """Build the recursive ``{col_or_alias_col: row_position}`` for any plan.
+
+    Walks the Plan tree; for a leaf :class:`SeqScan` /
+    :class:`IndexScan` returns that table's ``name_to_idx`` plus any
+    ``{alias}.{col}`` entries when an alias is supplied.  For a Join it
+    recursively merges the left and right row layouts, shifting the
+    right side by ``max(left bare positions) + 1`` so each side's
+    local column position lands at its actual row slot.
+
+    Other wrappers (:class:`Filter`, :class:`Project`, :class:`Sort`,
+    :class:`Limit`) are unwrapped until a leaf or join is reached.  A
+    bare-name collision keeps the left value (mirrors
+    :func:`merge_n2i`'s precedence); qualified ``{alias}.{col}``
+    entries are always added so the executor can disambiguate.
+
+    Used by :class:`~tinydb.executor.ops.Project`, :class:`Filter`,
+    and :class:`Sort` when their source is a join tree — the single-
+    level :func:`merge_n2i` only walks one join at a time.
+    """
+    from tinydb.executor.ops import SeqScan, IndexScan
+    if isinstance(plan, (SeqScan, IndexScan)):
+        meta = ctx.catalog.get_table(plan.table)
+        out: dict = {c.name: i for i, c in enumerate(meta.columns)}
+        if alias is not None:
+            for i, c in enumerate(meta.columns):
+                out[f"{alias}.{c.name}"] = i
+        return out
+    if isinstance(plan, (NestedLoopJoin, IndexedNestedLoopJoin)):
+        left_n2i = row_n2i_for_plan(plan.left, ctx, alias=plan.alias_left)
+        right_n2i = row_n2i_for_plan(plan.right, ctx, alias=plan.alias_right)
+        # Offset = next free slot after every bare-name position in
+        # left (qualified entries share the bare position).
+        left_bare_pos = [v for k, v in left_n2i.items() if "." not in k]
+        offset = (max(left_bare_pos) + 1) if left_bare_pos else 0
+        out = dict(left_n2i)
+        for col, idx in right_n2i.items():
+            shifted = idx + offset
+            if "." in col:
+                out[col] = shifted
+            elif col not in out:
+                out[col] = shifted
+        return out
+    if hasattr(plan, "src"):
+        return row_n2i_for_plan(plan.src, ctx, alias=alias)
+    return ctx.name_to_idx_for(getattr(plan, "table", ""))
+
+
 def _right_row_with_nulls(right_n2i: dict, right_size: int) -> tuple:
     """Produce a right-sized NULL row for LEFT-JOIN padding."""
     return tuple(None for _ in range(right_size))
@@ -112,15 +160,19 @@ class NestedLoopJoin(Plan):
         return self.left.table
 
     def open(self, ctx) -> Iterator[tuple]:
-        left_n2i = ctx.name_to_idx_for(self.left.table)
-        right_n2i = ctx.name_to_idx_for(self.right.table)
-        right_size = len(right_n2i)
+        # T-12.5: use the recursive helper so the on_expr sees columns
+        # from NESTED joins on either side.  The legacy merge_n2i only
+        # walked two leaves; the helper walks the full subtree.
+        merged_n2i = row_n2i_for_plan(self, ctx)
+        right_n2i_local = ctx.name_to_idx_for(self.right.table)
+        right_size = len(right_n2i_local)
+        # Materialise right rows once so the LEFT loop doesn't
+        # re-scan them for each outer row (v0.1 SeqScan is a generator
+        # that re-reads on every call).
+        right_rows = list(self.right.open(ctx))
         for left_row in self.left.open(ctx):
             matched = False
-            merged_n2i = merge_n2i(
-                left_n2i, right_n2i, self.alias_left, self.alias_right,
-            )
-            for right_row in self.right.open(ctx):
+            for right_row in right_rows:
                 if self.on_expr is None:
                     yield left_row + right_row
                     matched = True
@@ -131,7 +183,7 @@ class NestedLoopJoin(Plan):
                     yield combined
                     matched = True
             if not matched and self.nullable_right:
-                yield left_row + _right_row_with_nulls(right_n2i, right_size)
+                yield left_row + _right_row_with_nulls(right_n2i_local, right_size)
 
 
 class IndexedNestedLoopJoin(Plan):
@@ -277,4 +329,5 @@ __all__ = [
     "IndexedNestedLoopJoin",
     "NestedLoopJoin",
     "merge_n2i",
+    "row_n2i_for_plan",
 ]
