@@ -721,3 +721,79 @@ class TestIndexedNestedLoopJoin:
         from tinydb.executor.join import IndexedNestedLoopJoin, NestedLoopJoin
         assert isinstance(plan, (IndexedNestedLoopJoin, NestedLoopJoin))
         db.close()
+
+
+class TestNestedLoopJoinOperator:
+    """T-12.2 — focused NLJ operator correctness tests (REQ-JOIN-6)."""
+
+    def _build_db(self, tmp_db_path):
+        from tinydb import open as tdb_open
+        db = tdb_open(str(tmp_db_path))
+        db.execute(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"
+        )
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        db.execute(
+            "INSERT INTO orders VALUES (10, 1, 100), (20, 1, 200), (30, 3, 50)"
+        )
+        return db
+
+    def test_nlj_inner(self, tmp_db_path) -> None:
+        """NLJ INNER: returns only matching rows."""
+        from tinydb.executor.join import NestedLoopJoin
+        db = self._build_db(tmp_db_path)
+        rows = db.execute(
+            "SELECT u.id, o.total FROM users u "
+            "INNER JOIN orders o ON u.id = o.user_id"
+        )
+        # user 1 has 2 orders, user 2 has 0 — INNER drops non-matching
+        assert len(rows) == 2
+        totals = sorted(r[1] for r in rows)
+        assert totals == [100, 200]
+        db.close()
+
+    def test_nlj_left_preserves_left(self, tmp_db_path) -> None:
+        """NLJ LEFT: every left row appears at least once."""
+        from tinydb import open as tdb_open
+        db = tdb_open(str(tmp_db_path))
+        db.execute(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"
+        )
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        db.execute("INSERT INTO orders VALUES (10, 1, 100), (20, 1, 200)")
+        rows = db.execute(
+            "SELECT u.id, o.total FROM users u "
+            "LEFT JOIN orders o ON u.id = o.user_id"
+        )
+        # Alice has 2 matches, Bob has none (NULL-padded).
+        user_ids = [r[0] for r in rows]
+        assert sorted(user_ids) == [1, 1, 2]
+        db.close()
+
+    def test_nlj_left_nulls_right(self, tmp_db_path) -> None:
+        """NLJ LEFT: unmatched right side emits NULLs."""
+        from tinydb import open as tdb_open
+        db = tdb_open(str(tmp_db_path))
+        db.execute(
+            "CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"
+        )
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        db.execute("INSERT INTO orders VALUES (10, 1, 100)")
+        rows = db.execute(
+            "SELECT u.id, o.total FROM users u "
+            "LEFT JOIN orders o ON u.id = o.user_id"
+        )
+        # Find Bob's row (no matching order) — o.total must be NULL.
+        bob_rows = [r for r in rows if r[0] == 2]
+        assert len(bob_rows) == 1
+        assert bob_rows[0][1] is None
+        db.close()
