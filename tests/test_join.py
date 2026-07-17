@@ -723,6 +723,52 @@ class TestIndexedNestedLoopJoin:
         db.close()
 
 
+class TestPlannerOperatorSelection:
+    """T-12.4 — PhysicalPlanner chooses INLJ vs NLJ based on index availability."""
+
+    def test_planner_picks_inlj_when_index_available(self, tmp_db_path) -> None:
+        """An indexable inner column prompts the planner to use INLJ."""
+        from tinydb import open as tdb_open
+        from tinydb.executor.join import IndexedNestedLoopJoin
+        from tinydb.executor.planner import PhysicalPlanner
+        db = tdb_open(str(tmp_db_path))
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        db.execute("INSERT INTO orders VALUES (10, 1, 100)")
+        db.execute("CREATE INDEX idx_orders_user_id ON orders (user_id)")
+        planner = PhysicalPlanner(db.catalog, db.executor.indexer)
+        stmt = parse(
+            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
+        )
+        phys = planner.plan(emit_logical(stmt))
+        assert isinstance(phys.steps[0], IndexedNestedLoopJoin)
+        db.close()
+
+    def test_planner_picks_nlj_otherwise(self, tmp_db_path) -> None:
+        """Without an index the planner falls back to NestedLoopJoin."""
+        from tinydb import open as tdb_open
+        from tinydb.executor.join import NestedLoopJoin
+        from tinydb.executor.planner import PhysicalPlanner
+        db = tdb_open(str(tmp_db_path))
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice')")
+        db.execute("INSERT INTO orders VALUES (10, 1, 100)")
+        # No index on orders.user_id → planner must pick NLJ.
+        planner = PhysicalPlanner(db.catalog, db.executor.indexer)
+        stmt = parse(
+            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
+        )
+        phys = planner.plan(emit_logical(stmt))
+        assert isinstance(phys.steps[0], NestedLoopJoin)
+        db.close()
+
+
 class TestIndexedNestedLoopJoinOperator:
     """T-12.3 — INLJ uses the live index; falls back when no index matches."""
 
