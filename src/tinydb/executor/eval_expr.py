@@ -53,6 +53,13 @@ def eval_expr(
     if isinstance(expr, TypedLiteral):
         return expr.value
     if isinstance(expr, ColumnRef):
+        # When ``expr.table`` is set we expect the caller to have built
+        # ``name_to_idx`` with qualified keys (``alias.col``).  Try the
+        # qualified key first; fall back to the bare name so callers
+        # that only index by bare column (v0.1 single-table paths)
+        # still work.
+        if expr.table is not None and f"{expr.table}.{expr.name}" in name_to_idx:
+            return row[name_to_idx[f"{expr.table}.{expr.name}"]]
         try:
             return row[name_to_idx[expr.name]]
         except KeyError as exc:

@@ -149,8 +149,20 @@ class Filter(Plan):
 
     def open(self, ctx: "Executor") -> Iterator[Row]:
         from tinydb.executor.eval_expr import eval_expr
+        from tinydb.executor.join import (
+            IndexedNestedLoopJoin,
+            NestedLoopJoin,
+            row_n2i_for_plan,
+        )
 
-        n2i = ctx.name_to_idx_for(self.table)
+        # When the upstream is a JOIN, predicate evaluation needs the
+        # merged name_to_idx (both sides' columns plus qualified
+        # ``alias.col`` entries); single-table plans keep the v0.1
+        # fast path.
+        if isinstance(self.src, (NestedLoopJoin, IndexedNestedLoopJoin)):
+            n2i = row_n2i_for_plan(self.src, ctx)
+        else:
+            n2i = ctx.name_to_idx_for(self.table)
         for row in self.src.open(ctx):
             v = eval_expr(self.predicate, row, n2i)  # type: ignore[arg-type]
             if v:
@@ -180,19 +192,130 @@ class Project(Plan):
     def open(self, ctx: "Executor") -> Iterator[Row]:
         from tinydb.executor.eval_expr import eval_expr
 
-        n2i = ctx.name_to_idx_for(self.table)
+        # When the upstream is a JOIN, the row layout is left_row+right_row
+        # and the project's column list may refer to either side.  We
+        # build a merged name_to_idx that covers both halves of the
+        # upstream's table pair (only one extra resolve per column).
+        n2i = _project_name_to_idx(ctx, self)
         for row in self.src.open(ctx):
             out: list = []
             for i, col_name in enumerate(self.columns):
-                if col_name in n2i:
+                # Prefer a qualified lookup when the SELECT item carries
+                # a table/alias — bare-name resolution would otherwise
+                # return the leftmost side on a name collision
+                # (e.g. ``SELECT b.m`` with ``a JOIN b`` both having
+                # ``m``).
+                item = self.items[i] if self.items and i < len(self.items) else None
+                if (
+                    item is not None
+                    and getattr(item, "table", None) is not None
+                    and f"{item.table}.{col_name}" in n2i
+                ):
+                    out.append(row[n2i[f"{item.table}.{col_name}"]])
+                elif col_name in n2i:
                     out.append(row[n2i[col_name]])
-                elif self.items and i < len(self.items):
-                    out.append(eval_expr(self.items[i], row, n2i))  # type: ignore[arg-type]
+                elif item is not None:
+                    out.append(eval_expr(item, row, n2i))  # type: ignore[arg-type]
                 else:
-                    raise NotImplementedError(
-                        f"project column {col_name!r} has no source item"
+                    # T-13.1: aggregate labels (``COUNT(*)`` etc.) show
+                    # up as plain strings in ``self.columns`` because the
+                    # SELECT list carries a literal Aggregate node but
+                    # the projection step works in label space.  When
+                    # the source is an Aggregate plan the label resolves
+                    # via the aggregate's own row layout (handled in
+                    # ``_project_name_to_idx``), so falling through to
+                    # the underlying row index here means a label
+                    # mismatch in the upstream layout — surface a
+                    # actionable error instead of NotImplementedError.
+                    raise LookupError(
+                        f"project column {col_name!r} not found in "
+                        f"upstream row layout; columns={list(n2i.keys())!r}"
                     )
             yield tuple(out)
+
+
+def _project_name_to_idx(ctx, project) -> dict:
+    """Return the merged column-index map a :class:`Project` should use.
+
+    Single-table plans get the table's bare ``name_to_idx``.  Plans that
+    sit on top of a JOIN tree (direct or wrapped through Filter/Sort)
+    get a recursive merge that walks nested joins (T-12.5) so 3-table
+    queries resolve qualified refs correctly.  Plans sitting on top of
+    an :class:`Aggregate` get the aggregate's own row layout
+    (``group_keys + aggregate values``) so ``SELECT a, COUNT(*) FROM t
+    GROUP BY a`` projects without an additional lookup.
+    """
+    from tinydb.executor.aggregate import Aggregate as AggregatePlan
+    from tinydb.executor.join import (
+        IndexedNestedLoopJoin,
+        NestedLoopJoin,
+        row_n2i_for_plan,
+    )
+    if isinstance(project.src, AggregatePlan):
+        agg = project.src
+        out: dict = {col: i for i, col in enumerate(agg.keys)}
+        synth_offset = len(agg.keys)
+        for i, (func, column) in enumerate(agg.aggregates):
+            out[f"{func}({column})"] = synth_offset + i
+        return out
+    src = project.src
+    # Walk through Filter / Sort / Limit wrappers to find the join.
+    candidate = src
+    while hasattr(candidate, "src") and not isinstance(
+        candidate, (NestedLoopJoin, IndexedNestedLoopJoin)
+    ):
+        candidate = candidate.src
+    if isinstance(candidate, (NestedLoopJoin, IndexedNestedLoopJoin)):
+        return row_n2i_for_plan(candidate, ctx)
+    return ctx.name_to_idx_for(project.table)
+
+
+def _project_source_n2i(ctx, project, fallback_table: str) -> dict:
+    """Shared helper for Project-over-Join n2i resolution.
+
+    Used by both :func:`_project_name_to_idx` (projection lookup) and
+    the :class:`Sort` planner (sort-key lookup) so the two stay in
+    sync.  Walks down from ``project.src`` through wrapper plans
+    (Filter / Limit / Sort) until it finds a JOIN tree or a leaf
+    scan; falls back to the table's bare ``name_to_idx``.
+    """
+    from tinydb.executor.join import (
+        IndexedNestedLoopJoin,
+        NestedLoopJoin,
+        row_n2i_for_plan,
+    )
+    candidate = project.src
+    while hasattr(candidate, "src") and not isinstance(
+        candidate, (NestedLoopJoin, IndexedNestedLoopJoin)
+    ):
+        candidate = candidate.src
+    if isinstance(candidate, (NestedLoopJoin, IndexedNestedLoopJoin)):
+        return row_n2i_for_plan(candidate, ctx)
+    return ctx.name_to_idx_for(fallback_table)
+
+
+def _resolve_proj_index(
+    base_idx: dict,
+    item,
+    col_name: str,
+) -> int:
+    """Pick the row-slot for a Project label against a JOIN's merged n2i.
+
+    When the SELECT item carries an alias (``u1.name``) and the
+    merged map has a qualified ``u1.name`` entry, prefer that — it
+    pins the slot to the correct side.  Otherwise fall back to the
+    bare column name.  Raises :class:`UnknownColumnError` when
+    neither form resolves, mirroring the executor's runtime safety
+    net.
+    """
+    from tinydb.executor.planner import UnknownColumnError
+
+    table = getattr(item, "table", None) if item is not None else None
+    if table is not None and f"{table}.{col_name}" in base_idx:
+        return base_idx[f"{table}.{col_name}"]
+    if col_name in base_idx:
+        return base_idx[col_name]
+    raise UnknownColumnError(f"{col_name!r} not in base layout")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -214,6 +337,11 @@ class Sort(Plan):
 
     def open(self, ctx: "Executor") -> Iterator[Row]:
         from tinydb.executor.aggregate import Aggregate as AggregatePlan
+        from tinydb.executor.join import (
+            IndexedNestedLoopJoin,
+            NestedLoopJoin,
+            row_n2i_for_plan,
+        )
         from tinydb.executor.planner import UnknownColumnError
 
         rows = list(self.src.open(ctx))
@@ -233,18 +361,49 @@ class Sort(Plan):
             for i, (func, column) in enumerate(self.src.aggregates):
                 col_idx[f"{func}({column})"] = synth_offset + i
         elif isinstance(self.src, Project):
-            base_idx = ctx.name_to_idx_for(self.table)
+            # T-13.1: When the Project sits on top of a JOIN tree
+            # (direct or wrapped through Filter/Limit), `base_idx`
+            # must reflect the MERGED layout — otherwise sort keys
+            # that point at columns on the right side (e.g.
+            # ``ORDER BY o.total``) silently fall off the leftmost
+            # table's n2i and the column lookup raises
+            # UnknownColumnError.  Walk through wrappers until we
+            # hit a join; fall back to the table's bare n2i for
+            # single-table sources.
+            base_idx = _project_source_n2i(ctx, self.src, self.table)
             proj_labels = list(self.src.columns)
             proj_idx = {c: i for i, c in enumerate(proj_labels)}
             needs_base = any(col not in proj_idx for col, _ in self.keys)
             if needs_base:
-                # Re-open the upstream of Project (the underlying Scan)
-                # and sort over the BASE table's rows, then project.
+                # Re-open the upstream of Project (the underlying Scan
+                # or JOIN tree) and sort over its BASE rows, then
+                # project.  When the base is a join, the rows already
+                # carry both sides so re-opening via the Project's
+                # source path returns the merged layout.
                 sort_rows = list(self.src.src.open(ctx))
                 col_idx = base_idx
-                post_proj_indices = tuple(base_idx[c] for c in proj_labels)
+                # T-13.1: prefer the qualified ``alias.col`` key when
+                # the Project's items carry an alias — otherwise the
+                # bare-name lookup would pick the LEFT side's column
+                # for both ``u1.name`` and ``u2.name`` (or for
+                # self-joins where both sides share the same table).
+                post_proj_indices = tuple(
+                    _resolve_proj_index(base_idx, item, col_name)
+                    for item, col_name in zip(
+                        self.src.items
+                        if self.src.items
+                        else (None,) * len(proj_labels),
+                        proj_labels,
+                    )
+                )
             else:
                 col_idx = proj_idx
+        elif isinstance(self.src, (NestedLoopJoin, IndexedNestedLoopJoin)):
+            # T-12.5: SORT over a JOIN tree must use the merged
+            # name_to_idx so ORDER BY can see columns from both sides.
+            col_idx = row_n2i_for_plan(self.src, ctx)
+            # Rows here are pre-projection merged tuples already.
+            post_proj_indices = None
         else:
             col_idx = ctx.name_to_idx_for(self.table)
 

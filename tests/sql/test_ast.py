@@ -27,6 +27,7 @@ from tinydb.sql.ast import (
     Select,
     Star,
     Statement,
+    Table,
     UnaryOp,
     Update,
 )
@@ -84,7 +85,7 @@ def test_insert_with_columns_and_values():
 def test_select_full_clauses():
     sel = Select(
         columns=(ColumnRef(name="id"), ColumnRef(name="name")),
-        table="users",
+        from_=Table(name="users"),
         where=BinaryOp(op=">=", left=ColumnRef(name="age"), right=Literal(value=18)),
         order_by=(OrderBy(column="name", descending=False),),
         limit=10,
@@ -103,7 +104,7 @@ def test_select_full_clauses():
 
 def test_select_default_optional_clauses():
     """Bare SELECT * FROM t has no where/order/limit/offset/group/aggregates."""
-    sel = Select(columns=(Star(),), table="t")
+    sel = Select(columns=(Star(),), from_=Table(name="t"))
     assert sel.where is None
     assert sel.order_by == ()
     assert sel.limit is None
