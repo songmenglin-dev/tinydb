@@ -15,11 +15,21 @@ Index selection
 from the WHERE clause; when an index covers that column it returns an
 :class:`IndexScan`, otherwise ``None`` so the caller falls back to
 ``SeqScan + Filter``.
+
+T-12.1 split
+------------
+:class:`LogicalPlanner` (B11) and :class:`PhysicalPlanner` are
+introduced as thin class-based entry points so callers can pass
+``(catalog, index_manager)`` once at construction and plan multiple
+queries without re-injecting dependencies.  Both classes delegate to
+the existing function-shaped helpers so v0.1 tests keep working
+unchanged.
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, TYPE_CHECKING
 
 from tinydb.errors import TinydbError
 from tinydb.executor.executor import Executor  # re-export
@@ -54,6 +64,9 @@ from tinydb.sql.ast import (
 )
 from tinydb.storage.catalog import Catalog, IndexMeta, TableMeta
 
+if TYPE_CHECKING:  # pragma: no cover — only for type checkers
+    from tinydb.executor.logical import LogicalPlan
+
 
 class UnknownTableError(TinydbError):
     """A statement referenced a table that is not in the catalog."""
@@ -61,6 +74,72 @@ class UnknownTableError(TinydbError):
 
 class UnknownColumnError(TinydbError):
     """A statement referenced a column that does not exist in the table."""
+
+
+# --- T-12.1: PhysicalPlanner / PhysicalPlan / PhysicalNode ------------
+
+
+class PhysicalNode:
+    """Marker — every physical-plan tree node inherits from this class.
+
+    The tree itself is the existing ``tinydb.executor.ops.Plan``
+    hierarchy (SeqScan / IndexScan / Filter / Project / Sort / Limit /
+    NestedLoopJoin / IndexedNestedLoopJoin).  :class:`PhysicalNode` is a
+    sibling marker so the new :class:`PhysicalPlan` container can accept
+    any of them without re-exporting v0.1 ``Plan`` here.
+    """
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PhysicalPlan:
+    """Top-level physical plan: an ordered list of root nodes.
+
+    v0.2 only emits a single root node per SELECT, so ``steps`` carries
+    one entry; the list shape is preserved to make room for parallel /
+    multi-step plans in later batches (Batch 16+).
+    """
+
+    steps: List["Plan | PhysicalNode"] = field(default_factory=list)
+
+
+class PhysicalPlanner:
+    """LogicalPlan → PhysicalPlan with catalog + index_manager injection.
+
+    The planner is stateful only in (catalog, index_manager); ``plan``
+    builds a fresh :class:`PhysicalPlan` on each call.  Selection rules
+    mirror the legacy :func:`emit_physical` (NLJ fallback, INLJ when
+    the inner-side join column has a live index).
+    """
+
+    def __init__(
+        self,
+        catalog: Catalog,
+        index_manager: Optional[IndexManager] = None,
+    ) -> None:
+        self._catalog = catalog
+        self._index_manager = index_manager
+
+    @property
+    def catalog(self) -> Catalog:
+        """Read-only handle to the injected catalog."""
+        return self._catalog
+
+    @property
+    def index_manager(self) -> Optional[IndexManager]:
+        """Read-only handle to the injected IndexManager (may be None)."""
+        return self._index_manager
+
+    def plan(self, logical: "LogicalPlan") -> PhysicalPlan:
+        """Lower ``logical`` into a :class:`PhysicalPlan` tree.
+
+        Dispatches into the legacy free-function
+        :func:`tinydb.executor.physical.emit_physical` so any operator
+        selection tweak lands in one place.  Returns a single-step
+        :class:`PhysicalPlan` wrapping the produced :class:`Plan`.
+        """
+        from tinydb.executor.physical import emit_physical
+        tree = emit_physical(logical, self._catalog, self._index_manager)
+        return PhysicalPlan(steps=[tree])
 
 
 def plan(
@@ -93,72 +172,76 @@ def _plan_select(
     catalog: Catalog,
     indexer: Optional[IndexManager] = None,
 ) -> Plan:
-    meta = _require_table(stmt.table, catalog)
-    if stmt.where is not None:
-        _validate_expr_columns(stmt.where, meta)
+    # T-11/12 split: route through LogicalPlanner → PhysicalPlanner.
+    # The legacy code below remains for any direct callers that build
+    # a Select without a from_ clause; in practice every parsed SELECT
+    # has a from_ and the new path runs.
+    from tinydb.sql.ast import Table as AstTable
+    if isinstance(stmt.from_, AstTable):
+        # Single-table fast path — same shape as v0.1.
+        meta = _require_table(stmt.from_.name, catalog)
+        if stmt.where is not None:
+            _validate_expr_columns(stmt.where, meta)
 
-    # Source: SeqScan by default; IndexScan when _try_index_plan succeeds.
-    src: Plan = SeqScan(table=meta.name)
-    if stmt.where is not None:
-        index_plan = _try_index_plan(stmt.where, meta, indexer)
-        src = Filter(src=src, predicate=stmt.where)
-        if index_plan is not None:
-            src = Filter(src=index_plan, predicate=stmt.where)
+        # Source: SeqScan by default; IndexScan when _try_index_plan succeeds.
+        src: Plan = SeqScan(table=meta.name)
+        if stmt.where is not None:
+            index_plan = _try_index_plan(stmt.where, meta, indexer)
+            src = Filter(src=src, predicate=stmt.where)
+            if index_plan is not None:
+                src = Filter(src=index_plan, predicate=stmt.where)
 
-    # T-5.6: when the SELECT carries aggregates or a GROUP BY, the
-    # Aggregate plan replaces Project.  It produces rows whose layout
-    # is ``(key_tuple..., agg_value_0, agg_value_1, ...)`` so a
-    # subsequent Project would have no useful work to do — the planner
-    # simply skips it (the executor surfaces the post-Aggregate tuple
-    # verbatim).  Plain SELECTs keep their Project as before.
-    #
-    # Note: the parser's ``SELECT`` builder doesn't yet populate
-    # ``Select.aggregates`` (T-3.5 left it ``()``); collect the
-    # Aggregate items by walking ``columns`` here so the planner
-    # works against real SQL.  When the parser catches up this
-    # helper collapses to ``tuple(stmt.aggregates)``.
-    agg_pairs: tuple = tuple(
-        (c.func, c.column) for c in stmt.columns if isinstance(c, Aggregate)
+        agg_pairs: tuple = tuple(
+            (c.func, c.column) for c in stmt.columns if isinstance(c, Aggregate)
+        )
+        if agg_pairs or stmt.group_by:
+            from tinydb.executor.aggregate import Aggregate as AggregatePlan
+
+            src = AggregatePlan(
+                src=src,
+                aggregates=agg_pairs,
+                keys=tuple(stmt.group_by),
+            )
+        else:
+            src = Project(
+                src=src,
+                columns=_project_columns(stmt, meta),
+                items=tuple(stmt.columns),
+            )
+
+        if stmt.order_by:
+            keys = [(ob.column, ob.descending) for ob in stmt.order_by]
+            known = set(meta_column_names(meta))
+            for col, _ in keys:
+                if col not in known:
+                    raise UnknownColumnError(col)
+            src = Sort(src=src, keys=keys)
+
+        if stmt.limit is not None or stmt.offset:
+            src = Limit(
+                src=src,
+                limit=stmt.limit if stmt.limit is not None else 0,
+                offset=stmt.offset or 0,
+            )
+
+        if stmt.group_by:
+            known = set(meta_column_names(meta))
+            for col in stmt.group_by:
+                if col not in known:
+                    raise UnknownColumnError(col)
+
+        return src
+
+    # JOIN path: emit logical, then physical, then wrap with WHERE/
+    # Project/Sort/Limit.
+    from tinydb.executor.logical import emit_logical
+    from tinydb.executor.physical import (
+        _wrap_with_select_clauses as _wrap,
+        emit_physical,
     )
-    if agg_pairs or stmt.group_by:
-        from tinydb.executor.aggregate import Aggregate as AggregatePlan
-
-        src = AggregatePlan(
-            src=src,
-            aggregates=agg_pairs,
-            keys=tuple(stmt.group_by),
-        )
-    else:
-        src = Project(
-            src=src,
-            columns=_project_columns(stmt, meta),
-            items=tuple(stmt.columns),
-        )
-
-    # ORDER BY → Sort (sort-only plan, no limit/offset).
-    if stmt.order_by:
-        keys = [(ob.column, ob.descending) for ob in stmt.order_by]
-        known = set(meta_column_names(meta))
-        for col, _ in keys:
-            if col not in known:
-                raise UnknownColumnError(col)
-        src = Sort(src=src, keys=keys)
-
-    # LIMIT/OFFSET → dedicated Limit plan, wrapping any Sort.
-    if stmt.limit is not None or stmt.offset:
-        src = Limit(
-            src=src,
-            limit=stmt.limit if stmt.limit is not None else 0,
-            offset=stmt.offset or 0,
-        )
-
-    if stmt.group_by:
-        known = set(meta_column_names(meta))
-        for col in stmt.group_by:
-            if col not in known:
-                raise UnknownColumnError(col)
-
-    return src
+    logical = emit_logical(stmt)
+    base = emit_physical(logical, catalog, indexer)
+    return _wrap(base, stmt, catalog)
 
 
 def _project_columns(stmt: Select, meta: TableMeta) -> list:
