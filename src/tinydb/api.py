@@ -249,40 +249,100 @@ class Database:
         SELECT returns rows as ``list[tuple]``.  DML returns a single
         ``[(affected_count,)]`` row.  DDL returns ``[]``.  Raises
         :class:`~tinydb.errors.ParseError` on invalid SQL.
+
+        Thread-safety (v0.2):
+
+        DDL (CREATE/DROP TABLE, CREATE INDEX) and DML (INSERT/UPDATE/
+        DELETE) are wrapped in the writer-side of the
+        :class:`tinydb.concurrent.RWLock` so two threads inserting
+        into the same heap cannot interleave read-modify-write cycles.
+        SELECT is wrapped in the reader-side; multiple SELECTs run
+        concurrently but block while a writer is active.
+
+        Cross-process (when ``use_process_lock=True``) the same code
+        path additionally holds a :class:`ProcessLock` exclusive
+        around writes and shared around reads, so a subprocess writer
+        committing cannot interleave with a subprocess reader's
+        SELECT (REQ-CONC-2 / REQ-CONC-8).
         """
         stmt = parse(sql)
-        # DDL is handled here so the planner stays DML-only (T-5.1).
-        if isinstance(stmt, CreateTable):
-            self._catalog.create_table(stmt.name, stmt.columns)
-            # T-7.2: surface PRIMARY KEY by auto-creating a unique
-            # index on the column.  v0.1 stores the PK flag but does
-            # not enforce it; routing the constraint through the
-            # existing IndexManager lets the same UNIQUE-precheck path
-            # reject duplicate-key inserts with ConstraintViolation.
-            for col in stmt.columns:
-                if col.primary_key:
-                    self._indexer.create_index(
-                        f"pk_{stmt.name}_{col.name}",
-                        stmt.name,
-                        [col.name],
-                        unique=True,
-                    )
-            return []
-        if isinstance(stmt, DropTable):
-            if stmt.name in self._catalog.list_tables():
-                # Drop indexes that belong to this table first so the
-                # catalog doesn't carry orphan IndexMeta entries for a
-                # table that no longer exists.
-                for idx_name in list(self._indexer.list_indexes(stmt.name)):
-                    self._indexer.drop_index(idx_name)
-                self._catalog.drop_table(stmt.name)
-            return []
-        if isinstance(stmt, CreateIndex):
-            self._indexer.create_index(
-                stmt.name, stmt.table, list(stmt.columns), unique=stmt.unique,
-            )
-            return []
-        plan = _plan(stmt, self._catalog, indexer=self._indexer)
+        is_ddl = isinstance(stmt, (CreateTable, DropTable, CreateIndex))
+        if is_ddl:
+            plan = None
+            is_write = True
+        else:
+            plan = _plan(stmt, self._catalog, indexer=self._indexer)
+            # Lazy import to avoid a circular dep at module load.
+            from tinydb.executor.dml import Delete, Insert, Update
+            is_write = isinstance(plan, (Insert, Update, Delete))
+
+        rwlock = self._txn.rwlock
+        # Detect whether we're already inside a transaction begun
+        # via :meth:`Database.transaction`.  The transaction manager
+        # already holds the writer side of the RWLock for its
+        # lifetime, so re-acquiring it would deadlock (the RWLock is
+        # non-reentrant).  When active_tx is set, the existing lock
+        # already serializes this ``execute`` against any sibling
+        # threads, and we can skip the explicit acquire.
+        inside_tx = self._txn.active_tx is not None
+        if inside_tx:
+            # No additional lock needed; the tx holds the writer lock.
+            return self._execute_unlocked(stmt, plan, is_ddl)
+        rw_cm = rwlock.write() if is_write else rwlock.read()
+
+        with rw_cm:
+            # Cross-process: serialize with other processes holding
+            # the same .db.  The per-call lock is in addition to the
+            # intra-process RWLock above; the dual gate is necessary
+            # because the intra-process RWLock only protects against
+            # threads in *this* process.
+            if self._use_process_lock:
+                from tinydb.concurrent.fcntl_lock import ProcessLock
+                wal_fp = self._wal._fp  # type: ignore[attr-defined]
+                with ProcessLock(wal_fp, exclusive=is_write):
+                    return self._execute_unlocked(stmt, plan, is_ddl)
+            return self._execute_unlocked(stmt, plan, is_ddl)
+
+    def _execute_unlocked(self, stmt, plan, is_ddl: bool) -> list:
+        """Execute ``stmt`` / ``plan`` assuming both locks are held.
+
+        Split out so the lock-wrapping boilerplate lives in
+        :meth:`execute` and the plan-dispatch logic stays compact.
+        The parameter triple mirrors what :meth:`execute` decided at
+        parse time.
+        """
+        if is_ddl:
+            # DDL is handled here so the planner stays DML-only (T-5.1).
+            if isinstance(stmt, CreateTable):
+                self._catalog.create_table(stmt.name, stmt.columns)
+                # T-7.2: surface PRIMARY KEY by auto-creating a unique
+                # index on the column.  v0.1 stores the PK flag but does
+                # not enforce it; routing the constraint through the
+                # existing IndexManager lets the same UNIQUE-precheck path
+                # reject duplicate-key inserts with ConstraintViolation.
+                for col in stmt.columns:
+                    if col.primary_key:
+                        self._indexer.create_index(
+                            f"pk_{stmt.name}_{col.name}",
+                            stmt.name,
+                            [col.name],
+                            unique=True,
+                        )
+                return []
+            if isinstance(stmt, DropTable):
+                if stmt.name in self._catalog.list_tables():
+                    # Drop indexes that belong to this table first so the
+                    # catalog doesn't carry orphan IndexMeta entries for a
+                    # table that no longer exists.
+                    for idx_name in list(self._indexer.list_indexes(stmt.name)):
+                        self._indexer.drop_index(idx_name)
+                    self._catalog.drop_table(stmt.name)
+                return []
+            if isinstance(stmt, CreateIndex):
+                self._indexer.create_index(
+                    stmt.name, stmt.table, list(stmt.columns), unique=stmt.unique,
+                )
+                return []
         return self._executor.execute(plan)
 
     def explain(self, sql: str) -> str:
