@@ -723,6 +723,71 @@ class TestIndexedNestedLoopJoin:
         db.close()
 
 
+class TestIndexedNestedLoopJoinOperator:
+    """T-12.3 — INLJ uses the live index; falls back when no index matches."""
+
+    def test_inlj_uses_index(self, tmp_db_path) -> None:
+        """With a B-tree index on the inner-side join column, INLJ is chosen."""
+        from tinydb import open as tdb_open
+        from tinydb.executor.join import IndexedNestedLoopJoin
+        from tinydb.executor.physical import emit_physical
+        db = tdb_open(str(tmp_db_path))
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        db.execute("INSERT INTO orders VALUES (10, 1, 100), (20, 2, 200)")
+        # Critical: explicit B-tree on the inner-side join column.
+        db.execute(
+            "CREATE INDEX idx_orders_user_id ON orders (user_id)"
+        )
+        stmt = parse(
+            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
+        )
+        plan = emit_physical(
+            emit_logical(stmt), db.catalog, db.executor.indexer,
+        )
+        assert isinstance(plan, IndexedNestedLoopJoin), (
+            f"expected INLJ, got {type(plan).__name__}"
+        )
+        # Spot-check that the INLJ reads the index by name.
+        assert plan.right_index == "idx_orders_user_id"
+        assert plan.right_key_column == "user_id"
+        # Functional check — the JOIN still returns the right rows.
+        rows = db.execute(
+            "SELECT u.name, o.total FROM users u "
+            "JOIN orders o ON u.id = o.user_id"
+        )
+        assert sorted(rows) == [("Alice", 100), ("Bob", 200)]
+        db.close()
+
+    def test_inlj_falls_back_when_no_index(self, tmp_db_path) -> None:
+        """Without an index on the inner-side join column, NLJ is chosen."""
+        from tinydb import open as tdb_open
+        from tinydb.executor.join import NestedLoopJoin
+        from tinydb.executor.physical import emit_physical
+        db = tdb_open(str(tmp_db_path))
+        db.execute("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)")
+        db.execute(
+            "CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total INT)"
+        )
+        db.execute("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')")
+        db.execute("INSERT INTO orders VALUES (10, 1, 100), (20, 2, 200)")
+        # No CREATE INDEX — INLJ can't materialise because the B-tree
+        # doesn't exist for user_id.
+        stmt = parse(
+            "SELECT u.name FROM users u JOIN orders o ON u.id = o.user_id"
+        )
+        plan = emit_physical(
+            emit_logical(stmt), db.catalog, db.executor.indexer,
+        )
+        assert isinstance(plan, NestedLoopJoin), (
+            f"expected NLJ fallback, got {type(plan).__name__}"
+        )
+        db.close()
+
+
 class TestNestedLoopJoinOperator:
     """T-12.2 — focused NLJ operator correctness tests (REQ-JOIN-6)."""
 
