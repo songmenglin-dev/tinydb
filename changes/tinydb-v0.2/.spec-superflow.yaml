@@ -1,0 +1,42 @@
+# .spec-superflow.yaml — lightweight state machine
+# Derived data. Always rebuildable from artifacts. Lost/corrupt → fall back to content-level detection.
+
+# === Core state ===
+state: approved-for-build
+workflow: full
+
+# === Hashes (fast staleness detection) ===
+artifacts_hash: sha256:94e6928128165342ef620f6d218f747689c9e3658a86022d16e88b9d9fcee07c
+contract_hash: sha256:dbae33fbb9a08e23fda3b0e21f1338814694392c9e9718c525451cbb483f1c9f
+
+# === Execution progress ===
+execution_mode: sdd
+batches_completed: 0
+test_result: null
+spec_merged: false
+
+# === Metadata ===
+change_name: tinydb-v0.2
+last_transition: 2026-07-16T07:39:16.029Z
+last_transition_from: bridging
+last_transition_to: approved-for-build
+
+# === Decision points ===
+dp_0_decisions: change=tinydb-v0.2; intent=扩展 tinydb v0.2: 多表 JOIN + 并发控制 + CLI 增强(多行/语法高亮/行编辑/.explain 执行计划); scope=strict stay focused, 显式排除外键/视图/触发器/网络/复制; parallel=3 个独立 git worktree 并行 (JOIN/并发/CLI 各一), 中间通过公共 API 边界集成; execution_mode=sdd (user-elected DP-4 提前到 DP-0 确认); constraints=Python 3.10+, 零外部依赖, 单 .db 文件, B-tree 索引沿用, WAL 事务增强; comms=关键 DP 询问, 其他起草后给审
+dp_0_result: confirmed
+dp_0_confirmed: true
+dp_0_timestamp: 2026-07-16T05:46:01Z
+dp_1_result: auto-inferred + dp_0 pre-confirmed execution_mode=sdd; workflow=full; 3 large features (JOIN/concurrency/CLI) with cross-cutting impact + 3 worktree parallel + 3 implementer dispatch pattern = exceeds inlineThreshold=3, requires full sdd workflow with batch decomposition
+dp_1_timestamp: 2026-07-16T05:46:12Z
+dp_2_result: approved: 4 artifacts passed (proposal + 35 REQ specs/16 cli/10 join/9 concurrent + 13 design decisions + 38 tasks 12 batches). MySQL-style table output added per user DP-2 iteration (REQ-CLI-12..16 + D-11..13 + T-20.6..20.10). 3 worktree parallel + SDD execution mode preserved.
+dp_2_timestamp: 2026-07-16T07:28:56Z
+dp_3_result: approved: contract aligned with build-executor SDD (Subagent-Driven Development); 12 batches/38 tasks/3 worktrees parallel; execution_mode=sdd per DP-0 user choice; per-task implementer+reviewer subagent dispatch; acceptance checks 4 items; escalation rules contract mismatch triggers rewind to specifying/bridging
+dp_3_timestamp: 2026-07-16T07:39:10Z
+dp_4_result: null
+dp_4_timestamp: null
+dp_5_result: null
+dp_5_timestamp: null
+dp_6_result: null
+dp_6_timestamp: null
+dp_7_result: null
+dp_7_timestamp: null

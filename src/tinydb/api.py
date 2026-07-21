@@ -42,6 +42,7 @@ from tinydb.storage.pager import Pager
 from tinydb.tx.manager import TransactionManager
 from tinydb.tx.recovery import Recovery
 from tinydb.tx.wal import WAL
+from tinydb.types.system import Column, TypeTag
 
 
 class IsolationLevel(Enum):
@@ -346,16 +347,22 @@ class Database:
         return self._executor.execute(plan)
 
     def explain(self, sql: str) -> str:
-        """Return a textual execution plan for ``sql``.
+        """Return a textual execution plan for ``sql`` as an ASCII tree.
 
-        v0.2: returns a single-line summary of the physical plan
-        steps.  The richer ASCII tree rendering lives in
-        :mod:`tinydb.cli.explain`; this method is meant for
-        programmatic consumers.
+        v0.2: back the ``.explain <SQL>`` REPL command.  Returns the
+        concatenated Logical / Physical trees from
+        :mod:`tinydb.cli.explain`, or raises the same errors as
+        :meth:`execute` for invalid SQL.  Programmatic consumers that
+        only need a single-line summary can use :func:`repr` on the
+        returned plan tree directly.
         """
+        from tinydb.cli.explain import format_plan_pair
         stmt = parse(sql)
-        plan = _plan(stmt, self._catalog, indexer=self._indexer)
-        return repr(plan)
+        logical = _plan(stmt, self._catalog, indexer=self._indexer)
+        # Join worktree augments ``plan`` to emit JoinNodes; the
+        # physical walker reuses the same tree for v0.2 since the
+        # operator types are 1:1 with logical operators.
+        return format_plan_pair(logical, logical)
 
     def list_tables(self) -> List[str]:
         """Return the names of all tables in the catalog (sorted)."""
@@ -426,3 +433,40 @@ __all__ = [
     "IsolationLevel",
     "open",
 ]
+
+
+# --- helpers used by get_schema and the CLI REPL -----------------------
+
+
+_TAG_TO_SQL: dict = {
+    TypeTag.Int: "INT",
+    TypeTag.Float: "FLOAT",
+    TypeTag.Text: "TEXT",
+    TypeTag.Bool: "BOOL",
+    TypeTag.Date: "DATE",
+    TypeTag.Time: "TIME",
+    TypeTag.Datetime: "DATETIME",
+    TypeTag.Decimal: "DECIMAL",
+    TypeTag.Blob: "BLOB",
+    TypeTag.Json: "JSON",
+}
+
+
+def _column_to_sql(col: Column) -> str:
+    parts = [col.name, _TAG_TO_SQL.get(col.tag, col.tag.name)]
+    if col.primary_key:
+        parts.append("PRIMARY KEY")
+    elif col.unique:
+        parts.append("UNIQUE")
+    if col.not_null:
+        parts.append("NOT NULL")
+    return " ".join(parts)
+
+
+def _build_create_table_sql(table_name: str, columns) -> str:
+    cols_sql = ", ".join(_column_to_sql(c) for c in columns)
+    return f"CREATE TABLE {table_name} ({cols_sql});"
+
+
+class _MissingDatabase:  # pragma: no cover — re-exported below for type hints
+    """Placeholder; not user-facing.  See Database."""
