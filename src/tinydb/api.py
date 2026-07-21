@@ -380,11 +380,19 @@ class Database:
             raise TinydbError(f"no such table: {table!r}")
         cols: List[str] = []
         for c in schema.columns:
-            # Column has .name and .tag (a TypeTag enum); map to a
-            # SQL-friendly typename.
+            # Column has .name and .tag (a TypeTag enum); emit the
+            # enum name as the type so the round-trip parses.  Add
+            # PRIMARY KEY / UNIQUE / NOT NULL clauses so the schema
+            # string describes the column's constraints accurately
+            # (the CLI .schema command relies on PRIMARY KEY being
+            # present to render the v0.2 schema correctly).
             type_name = getattr(c.tag, "name", str(c.tag))
             parts = [c.name, type_name]
-            if c.not_null:
+            if getattr(c, "primary_key", False):
+                parts.append("PRIMARY KEY")
+            elif getattr(c, "unique", False):
+                parts.append("UNIQUE")
+            if getattr(c, "not_null", False):
                 parts.append("NOT NULL")
             cols.append(" ".join(parts))
         return f"CREATE TABLE {table} ({', '.join(cols)})"

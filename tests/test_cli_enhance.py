@@ -306,10 +306,15 @@ def test_dot_schema_known_table(tmp_path) -> None:
             "",
         ])
         joined = "\n".join(captured)
-        assert "CREATE TABLE u" in joined
-        assert "id INT" in joined
-        assert "name TEXT" in joined
-        assert "PRIMARY KEY" in joined
+        # v0.2 Database.get_schema uses type-tag enum names (Int/Text)
+        # rather than the SQL keyword (INT/TEXT) so that round-tripping
+        # through the parser still recognises the type.  Normalise case
+        # before asserting to remain robust.
+        joined_upper = joined.upper()
+        assert "CREATE TABLE U" in joined_upper
+        assert "ID INT" in joined_upper
+        assert "NAME TEXT" in joined_upper
+        assert "PRIMARY KEY" in joined_upper
     finally:
         db.close()
 
