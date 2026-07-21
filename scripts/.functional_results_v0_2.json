@@ -1,0 +1,162 @@
+[
+  {
+    "category": "JOIN",
+    "name": "INNER JOIN with table alias (3 rows: alice×2, bob×1)",
+    "passed": true,
+    "command": "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id",
+    "stdout": "[('alice', 100), ('alice', 50), ('bob', 200)]",
+    "error": ""
+  },
+  {
+    "category": "JOIN",
+    "name": "LEFT JOIN preserves unmatched (4 rows: carol → None)",
+    "passed": true,
+    "command": "SELECT u.name, o.amount FROM users u LEFT JOIN orders o ON u.id = o.user_id",
+    "stdout": "[('alice', 100), ('alice', 50), ('bob', 200), ('carol', None)]",
+    "error": ""
+  },
+  {
+    "category": "JOIN",
+    "name": "JOIN ... USING (id) matches by column name (3 rows)",
+    "passed": true,
+    "command": "SELECT u.name, t.tag FROM users u JOIN tags t USING (id)",
+    "stdout": "[('alice', 'a'), ('bob', 'b'), ('carol', 'c')]",
+    "error": ""
+  },
+  {
+    "category": "JOIN-Opt",
+    "name": "Without index → NestedLoopJoin",
+    "passed": true,
+    "command": "EXPLAIN SELECT p.name, s.qty FROM products p INNER JOIN sales s ON p.id = s.product_id",
+    "stdout": "LogicalPlan\n└── Project(table=products, cols=[name, qty])\n    └── NestedLoopJoin(table=products, on=BinaryOp(op='=', left=ColumnRef(name='id', table='p'), right=ColumnRef(name='product_id', table='s')))\n        ├── SeqScan(table=products)\n        └── SeqScan(table=sales)\nPhysicalPlan\n└── Project(table=products, cols=[name, qty])\n    └── NestedLoopJoin(table=products, on=BinaryOp(op='=', left=ColumnRef(name='id', table='p'), right=ColumnRef(name='product_id', table='s')))\n        ├── SeqScan(table=products)\n        └── SeqScan(table=sales)",
+    "error": ""
+  },
+  {
+    "category": "JOIN-Opt",
+    "name": "With index → IndexedNestedLoopJoin",
+    "passed": true,
+    "command": "EXPLAIN SELECT p.name, s.qty FROM products p INNER JOIN sales s ON p.id = s.product_id",
+    "stdout": "LogicalPlan\n└── Project(table=products, cols=[name, qty])\n    └── IndexedNestedLoopJoin(table=products, on=BinaryOp(op='=', left=ColumnRef(name='id', table='p'), right=ColumnRef(name='product_id', table='s')))\n        ├── SeqScan(table=products)\n        └── SeqScan(table=sales)\nPhysicalPlan\n└── Project(table=products, cols=[name, qty])\n    └── IndexedNestedLoopJoin(table=products, on=BinaryOp(op='=', left=ColumnRef(name='id', table='p'), right=ColumnRef(name='product_id', table='s')))\n        ├── SeqScan(table=products)\n        └── SeqScan(table=sales)",
+    "error": ""
+  },
+  {
+    "category": "JOIN-Opt",
+    "name": "Indexed join still returns 3 rows (apple×2, banana×1)",
+    "passed": true,
+    "command": "SELECT p.name, s.qty FROM products p INNER JOIN sales s ON p.id = s.product_id",
+    "stdout": "[('apple', 5), ('apple', 7), ('banana', 3)]",
+    "error": ""
+  },
+  {
+    "category": "Concurrency",
+    "name": "5 readers concurrent (sum≈283ms vs total≈61ms)",
+    "passed": true,
+    "command": "5× thread: rwlock.read() → SELECT COUNT(*) FROM kv",
+    "stdout": "per-thread ms=[(4, 53), (1, 55), (2, 57), (3, 58), (0, 60)], total=61ms",
+    "error": ""
+  },
+  {
+    "category": "Concurrency",
+    "name": "Writer blocks while reader holds lock (~100ms wait)",
+    "passed": true,
+    "command": "thread A: rwlock.read() + sleep(100ms); thread B: rwlock.write(timeout=500ms)",
+    "stdout": "writer waited [100]ms for reader to release",
+    "error": ""
+  },
+  {
+    "category": "Concurrency",
+    "name": "READ COMMITTED — concurrent tx observe consistent snapshot",
+    "passed": true,
+    "command": "writer tx UPDATE 0→100 (holds 100ms); reader tx SELECT (during writer tx)",
+    "stdout": "reader saw n=[100]",
+    "error": ""
+  },
+  {
+    "category": "Concurrency",
+    "name": "First process acquires ProcessLock (main proc, blocking)",
+    "passed": true,
+    "command": "ProcessLock(fp) → with-block",
+    "stdout": "",
+    "error": ""
+  },
+  {
+    "category": "Concurrency",
+    "name": "Child process blocked (timeout exceeded — lock contention confirmed)",
+    "passed": true,
+    "command": "subprocess with 2s timeout (should NOT return early)",
+    "stdout": "",
+    "error": ""
+  },
+  {
+    "category": "Concurrency",
+    "name": "After parent release, re-acquire is instant (0ms)",
+    "passed": true,
+    "command": "ProcessLock(fp2) immediately after release",
+    "stdout": "",
+    "error": ""
+  },
+  {
+    "category": "CLI-v0.2",
+    "name": "one-shot SELECT prints column headers + all 3 rows",
+    "passed": true,
+    "command": "python -m tinydb --db X -c 'SELECT * FROM users ORDER BY id'",
+    "stdout": "id name  age\n1  alice 30 \n2  bob   25 \n3  carol 35 \n",
+    "error": ""
+  },
+  {
+    "category": "CLI-v0.2",
+    "name": "one-shot INSERT returns affected row count",
+    "passed": true,
+    "command": "python -m tinydb --db X -c 'INSERT INTO users VALUES (4, \"dave\", 40)'",
+    "stdout": "1 row(s)\n",
+    "error": ""
+  },
+  {
+    "category": "CLI-v0.2",
+    "name": ".explain prints LogicalPlan + PhysicalPlan tree",
+    "passed": true,
+    "command": ".explain SELECT a.x, b.val FROM a INNER JOIN b ON a.x = b.x",
+    "stdout": "LogicalPlan\n└── Project(table=a, cols=[x, val])\n    └── IndexedNestedLoopJoin(table=a, on=BinaryOp(op='=', left=ColumnRef(name='x', table='a'), right=ColumnRef(name='x', table='b')))\n        ├── SeqScan(table=a)\n        └── SeqScan(table=b)\nPhysicalPlan\n└── Project(table=a, cols=[x, val])\n    └── IndexedNestedLoopJoin(table=a, on=BinaryOp(op='=', left=ColumnRef(name='x', table='a'), right=ColumnRef(name='x', table='b')))\n        ├── SeqScan(table=a)\n        └── SeqScan(table=b)",
+    "error": ""
+  },
+  {
+    "category": "CLI-v0.2",
+    "name": ".tables lists all user tables (alpha + beta)",
+    "passed": true,
+    "command": ".tables (via list_tables())",
+    "stdout": "['alpha', 'beta']",
+    "error": ""
+  },
+  {
+    "category": "E2E",
+    "name": "JOIN emp+dept ordered by salary desc (3 rows, bob/Eng/120 first)",
+    "passed": true,
+    "command": "SELECT e.emp_name, d.dept_name, e.salary FROM emp e JOIN dept d ON e.dept_id = d.id ORDER BY e.salary DESC",
+    "stdout": "[('bob', 'Eng', 120), ('alice', 'Eng', 100), ('carol', 'Sales', 90)]",
+    "error": ""
+  },
+  {
+    "category": "E2E",
+    "name": "UPDATE then re-query (bob now 150, alice still 100)",
+    "passed": true,
+    "command": "UPDATE emp SET salary=150 WHERE id=2; SELECT ... WHERE dept_id=10 ORDER BY salary DESC",
+    "stdout": "[('bob', 150), ('alice', 100)]",
+    "error": ""
+  },
+  {
+    "category": "v0.1-compat",
+    "name": "v0.1 SELECT WHERE + ORDER BY still works (2 rows)",
+    "passed": true,
+    "command": "SELECT * FROM users WHERE age > 20 ORDER BY age ASC",
+    "stdout": "[(2, 'bob', 25), (1, 'alice', 30)]",
+    "error": ""
+  },
+  {
+    "category": "v0.1-compat",
+    "name": "v0.1 aggregate COUNT/AVG still works",
+    "passed": true,
+    "command": "SELECT COUNT(*), AVG(age) FROM users",
+    "stdout": "[(2, 27.5)]",
+    "error": ""
+  }
+]
