@@ -35,8 +35,8 @@ dp_3_timestamp: 2026-07-16T07:39:10Z
 dp_4_result: SDD (Subagent-Driven): 12 batches × 38 tasks > inlineThreshold=3; 3 git worktrees created (feature/v0.2-join, feature/v0.2-concurrency, feature/v0.2-cli); per-task implementer+reviewer subagent dispatch via Agent tool; isolation preflight passed (master protected, edits go to feature branches); progress ledger at .superpowers/sdd/progress.md per worktree
 dp_4_timestamp: 2026-07-16T07:41:27Z
 dp_5_result: B21 reviewer APPROVE_WITH_NOTES: 4/4 acceptance checks pass (coverage 88.75% > 80%, 32T/5s stress, 4P 1W/3R, v0.1 compat suite). Scope audit clean (only intentional guards in parser.py + design docstring in snapshot.py). No Critical/Important issues; 4 Medium/Low notes (DRY in api.py, semicolon inconsistency, optional conftest.py, ID-fabrication caveat). Ready for DP-6 closeout.
-dp_5_timestamp: 2026-07-21T01:30:00Z
+dp_5_timestamp: 2026-07-21T10:00:00Z
 dp_6_result: DP-6 closeout complete: 3 delta specs (cli/concurrency/sql-join) reorganized into specs/<cap>/spec.md structure and synced to main specs/ via ssf sync. spec_merged=true. Change folder preserved for traceability. Ready for DP-7 release-archivist.
-dp_6_timestamp: 2026-07-21T02:00:00Z
+dp_6_timestamp: 2026-07-21T10:30:00Z
 dp_7_result: confirmed: tinydb v0.2.0 released. master @ 968d49f, tag tinydb-v0.2.0 @ f652636 (pushed to origin). Verification: 1003/1003 tests pass (DP-7 noted 1002/1003 with 1 WSL2 perf flake; later re-run showed 0 flakes). Coverage 88.75% > 80% gate. 4/4 contract acceptance checks pass. Functional tests 20/20 (100%) via scripts/functional_tests_v0_2.py. 3 feature worktrees + integrate worktree + undefined orphan branch cleaned. decision-point-audit.md generated.
 dp_7_timestamp: 2026-07-21T11:00:41Z
