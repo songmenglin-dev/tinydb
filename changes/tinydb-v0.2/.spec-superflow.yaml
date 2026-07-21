@@ -2,7 +2,7 @@
 # Derived data. Always rebuildable from artifacts. Lost/corrupt → fall back to content-level detection.
 
 # === Core state ===
-state: approved-for-build
+state: closed
 workflow: full
 
 # === Hashes (fast staleness detection) ===
@@ -11,15 +11,15 @@ contract_hash: sha256:dbae33fbb9a08e23fda3b0e21f1338814694392c9e9718c525451cbb48
 
 # === Execution progress ===
 execution_mode: sdd
-batches_completed: 0
-test_result: null
-spec_merged: false
+batches_completed: 12
+test_result: pass
+spec_merged: true
 
 # === Metadata ===
 change_name: tinydb-v0.2
-last_transition: 2026-07-16T07:39:16.029Z
-last_transition_from: bridging
-last_transition_to: approved-for-build
+last_transition: 2026-07-21T11:00:41Z
+last_transition_from: closing
+last_transition_to: closed
 
 # === Decision points ===
 dp_0_decisions: change=tinydb-v0.2; intent=扩展 tinydb v0.2: 多表 JOIN + 并发控制 + CLI 增强(多行/语法高亮/行编辑/.explain 执行计划); scope=strict stay focused, 显式排除外键/视图/触发器/网络/复制; parallel=3 个独立 git worktree 并行 (JOIN/并发/CLI 各一), 中间通过公共 API 边界集成; execution_mode=sdd (user-elected DP-4 提前到 DP-0 确认); constraints=Python 3.10+, 零外部依赖, 单 .db 文件, B-tree 索引沿用, WAL 事务增强; comms=关键 DP 询问, 其他起草后给审
@@ -32,11 +32,11 @@ dp_2_result: approved: 4 artifacts passed (proposal + 35 REQ specs/16 cli/10 joi
 dp_2_timestamp: 2026-07-16T07:28:56Z
 dp_3_result: approved: contract aligned with build-executor SDD (Subagent-Driven Development); 12 batches/38 tasks/3 worktrees parallel; execution_mode=sdd per DP-0 user choice; per-task implementer+reviewer subagent dispatch; acceptance checks 4 items; escalation rules contract mismatch triggers rewind to specifying/bridging
 dp_3_timestamp: 2026-07-16T07:39:10Z
-dp_4_result: null
-dp_4_timestamp: null
-dp_5_result: null
-dp_5_timestamp: null
-dp_6_result: null
-dp_6_timestamp: null
-dp_7_result: null
-dp_7_timestamp: null
+dp_4_result: SDD (Subagent-Driven): 12 batches × 38 tasks > inlineThreshold=3; 3 git worktrees created (feature/v0.2-join, feature/v0.2-concurrency, feature/v0.2-cli); per-task implementer+reviewer subagent dispatch via Agent tool; isolation preflight passed (master protected, edits go to feature branches); progress ledger at .superpowers/sdd/progress.md per worktree
+dp_4_timestamp: 2026-07-16T07:41:27Z
+dp_5_result: B21 reviewer APPROVE_WITH_NOTES: 4/4 acceptance checks pass (coverage 88.75% > 80%, 32T/5s stress, 4P 1W/3R, v0.1 compat suite). Scope audit clean (only intentional guards in parser.py + design docstring in snapshot.py). No Critical/Important issues; 4 Medium/Low notes (DRY in api.py, semicolon inconsistency, optional conftest.py, ID-fabrication caveat). Ready for DP-6 closeout.
+dp_5_timestamp: 2026-07-21
+dp_6_result: DP-6 closeout complete: 3 delta specs (cli/concurrency/sql-join) reorganized into specs/<cap>/spec.md structure and synced to main specs/ via ssf sync. spec_merged=true. Change folder preserved for traceability. Ready for DP-7 release-archivist.
+dp_6_timestamp: 2026-07-21
+dp_7_result: confirmed: tinydb v0.2.0 released. master @ 968d49f, tag tinydb-v0.2.0 @ f652636 (pushed to origin). Verification: 1003/1003 tests pass (DP-7 noted 1002/1003 with 1 WSL2 perf flake; later re-run showed 0 flakes). Coverage 88.75% > 80% gate. 4/4 contract acceptance checks pass. Functional tests 20/20 (100%) via scripts/functional_tests_v0_2.py. 3 feature worktrees + integrate worktree + undefined orphan branch cleaned. decision-point-audit.md generated.
+dp_7_timestamp: 2026-07-21T11:00:41Z
