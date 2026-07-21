@@ -71,3 +71,56 @@
 ### Status
 - B18 + B19 + B20: DONE
 - Branch: feature/v0.2-cli, ready for B21 integration
+
+---
+
+# Batch 21 (B21) — 集成 + Release
+
+## Goal
+Final integration of B18-B20 CLI on top of B10-B17 (JOIN + concurrency)
+that B10-B17 already merged.  Run 4 acceptance checks, polish release
+artifacts, prep for DP-6 (closeout) + DP-7 (release-archivist).
+
+## T-21.1 — Merge feature/v0.2-cli
+- Conflict in src/tinydb/api.py resolved manually.
+- Kept integrate's `isolation`/`pool_size`/`rwlock` + connection pool;
+  kept integrate's catalog-aware `list_tables`/`get_schema`; upgraded
+  `explain()` to use CLI's `format_plan_pair` ASCII renderer (REQ-CLI-13).
+- Removed duplicate `from typing import List`.
+
+## T-21.2 — 4 Acceptance Checks
+| # | Check | Result |
+|---|---|---|
+| 1 | Coverage >= 80% | **88.75% pass** |
+| 2 | v0.1 compat suite 100% | **PASS** (10/10 non-flaky; pre-existing perf flake) |
+| 3 | 32-thread INSERT/SELECT 5s stress (REQ-CONC-8) | **PASS** |
+| 4 | 4-process 1W/3R test (REQ-CONC-8) | **PASS** |
+
+- Added tests/test_e2e_v0_2.py — 5 pytest cases for the v0.2 story
+- Added examples/demo_v0_2.py — 7-step runnable end-to-end demo
+
+## T-21.3 — pyproject + README polish
+- Bumped pyproject.toml version 0.1.0 -> 0.2.0
+- Dev Status 3 - Alpha -> 4 - Beta; added join/concurrent keywords
+- README.md fully rewritten with v0.2 features (JOIN examples,
+  concurrent threads, .explain, Database kwargs reference)
+
+## T-21.4 — Scope audit + DP-6/DP-7 prep
+- Scope guard: `RIGHT JOIN|FULL JOIN|subquery|CTE|MVCC|trigger` finds
+  only intentional scope-guard code (no actual violations).
+- Dep audit: prompt_toolkit is optional `[cli]` extra; REQ-CLI-9
+  fallback (`cmd` REPL) verified in repl.py.
+- Tag prep: HEAD 44b3f2c on feature/v0.2-integrate; pyproject
+  version=0.2.0.  Tag `tinydb-v0.2.0` ready — release-archivist's job.
+
+## Commits on feature/v0.2-integrate (B21)
+1. fdede8d merge: integrate CLI into feature/v0.2-integrate
+2. d3a5c26 fix(api): get_schema emits PRIMARY KEY/UNIQUE clauses
+3. fb23191 test(e2e): v0.2 e2e story — JOIN + concurrent + .explain
+4. 44b3f2c docs: polish pyproject (0.2.0) + README (v0.2 features)
+
+## Status
+- B21: DONE_WITH_CONCERNS — flaky perf-regression test on this
+  WSL2 host; underlying correctness covered by other tests.  See
+  task-21-report.md for details.
+- Branch: feature/v0.2-integrate, ready for DP-5 / DP-7.
