@@ -17,6 +17,15 @@ the LSN / length fields.  This deviation is documented in the report.
 CRC-32 (ISO 3309 / ITU-T V.42) is used via :func:`zlib.crc32` rather
 than CRC-32C — CRC-32C would require a C extension we cannot take on as
 a dependency.  The single-bit detection property is preserved.
+
+v0.2 cross-process lock
+-----------------------
+Pass ``use_process_lock=True`` to :class:`WAL` to wrap every
+:meth:`append` call in a :class:`~tinydb.concurrent.ProcessLock`
+acquisition.  The lock is held only for the duration of the append
+itself, so concurrent readers are not blocked; the WAL file
+descriptor is shared (the same physical file is opened by every
+process).
 """
 from __future__ import annotations
 
@@ -87,12 +96,21 @@ class WAL:
     with :class:`tinydb.tx.WriteLock`.
     """
 
-    __slots__ = ("_path", "_fp", "_next_lsn", "_closed")
+    __slots__ = (
+        "_path", "_fp", "_next_lsn", "_closed", "_use_process_lock",
+    )
 
-    def __init__(self, path: Union[str, Path], *, mode: str = "r+b") -> None:
+    def __init__(
+        self,
+        path: Union[str, Path],
+        *,
+        mode: str = "r+b",
+        use_process_lock: bool = False,
+    ) -> None:
         self._path = Path(path)
         self._fp = self._path.open(mode)
         self._closed = False
+        self._use_process_lock = use_process_lock
         if mode == "r+b":
             self._next_lsn = self._recover_lsn()
         else:
@@ -132,13 +150,27 @@ class WAL:
         return self._fp.tell()
 
     def append(self, type: int, payload: bytes) -> int:
-        """Append one frame; return its assigned LSN."""
+        """Append one frame; return its assigned LSN.
+
+        When ``use_process_lock=True`` the entire append is wrapped in
+        a :class:`~tinydb.concurrent.ProcessLock` so concurrent
+        processes cannot interleave their WAL frames (REQ-CONC-2).
+        On platforms without any cross-process lock primitive this
+        raises :class:`~tinydb.concurrent.ProcessLockUnavailableError`.
+        """
         lsn = self._next_lsn
         body = struct.pack(_HEADER_FMT, lsn, type, len(payload)) + payload
         crc = _crc32(body)
-        self._fp.seek(0, 2)
-        self._fp.write(body + struct.pack(_CRC_FMT, crc))
-        self._fp.flush()
+        if self._use_process_lock:
+            from tinydb.concurrent.fcntl_lock import ProcessLock
+            with ProcessLock(self._fp, exclusive=True):
+                self._fp.seek(0, 2)
+                self._fp.write(body + struct.pack(_CRC_FMT, crc))
+                self._fp.flush()
+        else:
+            self._fp.seek(0, 2)
+            self._fp.write(body + struct.pack(_CRC_FMT, crc))
+            self._fp.flush()
         self._next_lsn = lsn + 1
         return lsn
 

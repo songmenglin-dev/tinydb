@@ -25,6 +25,7 @@ from tinydb.tx import (
     TransactionManager,
 )
 from tinydb.tx.manager import NestedTransactionError
+from tinydb.tx.snapshot import Snapshot
 
 
 class _StubPager:
@@ -119,7 +120,14 @@ def test_rollback_releases_lock(tmp_path):
 # 6. commit() / rollback() with a non-active tx raises ValueError.
 def test_commit_with_stale_tx_raises_value_error(tmp_path):
     mgr, wal = _make_manager(tmp_path)
-    stale = TransactionContext(tx_id=999, begin_lsn=1, manager=mgr)
+    # No transaction has been begun, so mgr.active_tx is None.
+    # Any TransactionContext we construct here is therefore stale.
+    stale = TransactionContext(
+        tx_id=999,
+        begin_lsn=1,
+        snapshot=Snapshot(lsn=0),
+        manager=mgr,
+    )
     with pytest.raises(ValueError):
         mgr.commit(stale)
     assert mgr.active_tx is None
@@ -129,7 +137,12 @@ def test_commit_with_stale_tx_raises_value_error(tmp_path):
 
 def test_rollback_with_stale_tx_raises_value_error(tmp_path):
     mgr, wal = _make_manager(tmp_path)
-    stale = TransactionContext(tx_id=999, begin_lsn=1, manager=mgr)
+    stale = TransactionContext(
+        tx_id=999,
+        begin_lsn=1,
+        snapshot=Snapshot(lsn=0),
+        manager=mgr,
+    )
     with pytest.raises(ValueError):
         mgr.rollback(stale)
     assert mgr.active_tx is None

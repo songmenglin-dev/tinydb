@@ -15,10 +15,23 @@ Node hierarchy
     ├── CreateTable(name, columns)
     ├── DropTable(name, if_exists=False)
     ├── Insert(table, columns, values)
-    ├── Select(columns, table, where=..., order_by=..., limit=...,
+    ├── Select(columns, from_, where=..., order_by=..., limit=...,
     │         offset=..., group_by=..., aggregates=...)
     ├── Update(table, set_clauses, where=...)
     └── Delete(table, where=...)
+
+    TableRef
+    ├── Table(name, alias=None)            # bare table or ``t alias``
+    └── Join(left, right, kind, on_expr, using=(), nullable_right=...)
+
+    JoinKind = INNER | LEFT
+
+    Expr
+    ├── Literal(value)
+    ├── ColumnRef(name, table=None)
+    ├── BinaryOp(op, left, right)
+    ├── UnaryOp(op, operand)
+    └── (Star — sentinel for SELECT *)
 
     Expr
     ├── Literal(value)
@@ -47,6 +60,56 @@ class Statement:
 
 class Expr:
     """Marker — every expression node inherits from this class."""
+
+
+class TableRef:
+    """Marker — every table-reference node inherits from this class."""
+
+
+class JoinKind:
+    """JOIN kind discriminator (REQ-JOIN-1, REQ-JOIN-2).
+
+    Plain strings ("INNER" / "LEFT") keep the type closed and trivially
+    comparable without an extra ``Enum`` import.  Stored on
+    :class:`Join` directly.
+    """
+
+    INNER = "INNER"
+    LEFT = "LEFT"
+
+
+# --- table-reference nodes (v0.2 JOIN) ---------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Table(TableRef):
+    """A bare table reference — ``FROM table_name`` or ``FROM t alias``.
+
+    ``alias`` is ``None`` when the SQL didn't supply one.  When set,
+    every column reference in the query must use the alias (REQ-JOIN-4).
+    """
+
+    name: str
+    alias: Optional[str] = None
+
+
+@dataclass(frozen=True, slots=True)
+class Join(TableRef):
+    """A binary JOIN expression — ``left [INNER|LEFT] JOIN right ON ...``.
+
+    ``using`` is the original USING column list (preserved so the planner
+    can deduplicate projection columns per REQ-JOIN-8); the planner also
+    synthesises the equivalent :attr:`on_expr` from USING when not given
+    explicitly.  ``nullable_right`` mirrors the SQL semantics: ``True``
+    for LEFT JOIN so the executor pads unmatched right rows with NULL.
+    """
+
+    left: "TableRef"
+    right: "TableRef"
+    kind: str  # JoinKind.INNER | JoinKind.LEFT
+    on_expr: Optional["Expr"]  # None when USING-only
+    using: Tuple[str, ...] = ()
+    nullable_right: bool = False
 
 
 # --- misc helpers -------------------------------------------------------
@@ -146,16 +209,37 @@ class Insert(Statement):
 
 @dataclass(frozen=True, slots=True)
 class Select(Statement):
-    """``SELECT ... FROM table [WHERE ...] [ORDER BY ...] [LIMIT ...]``."""
+    """``SELECT ... FROM table_ref [WHERE ...] [ORDER BY ...] [LIMIT ...]``.
+
+    v0.2: ``from_`` carries a :class:`TableRef` (Table or Join).  The
+    legacy ``table`` property returns the bare name when ``from_`` is a
+    plain :class:`Table` so v0.1 callers and tests continue to work.
+    """
 
     columns: Tuple["Expr", ...]  # ColumnRef / Aggregate / Star / Literal
-    table: str
+    from_: "TableRef"
     where: Optional["Expr"] = None
     order_by: Tuple[OrderBy, ...] = ()
     limit: Optional[int] = None
     offset: Optional[int] = None
     group_by: Tuple[str, ...] = ()
     aggregates: Tuple[Aggregate, ...] = ()
+
+    @property
+    def table(self) -> str:
+        """Legacy accessor: bare table name for single-table SELECTs.
+
+        Raises ``AttributeError`` for JOIN queries — callers handling
+        JOIN must walk :attr:`from_` directly.  Kept as a property (not
+        a stored field) so the dataclass stays frozen and v0.1 callers
+        that read ``stmt.table`` continue to work unchanged.
+        """
+        if isinstance(self.from_, Table):
+            return self.from_.name
+        raise AttributeError(
+            f"Select.table is undefined for {type(self.from_).__name__} "
+            f"FROM clause; use Select.from_ instead"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,12 +326,16 @@ __all__ = [
     "Expr",
     "GroupBy",
     "Insert",
+    "Join",
+    "JoinKind",
     "Limit",
     "Literal",
     "OrderBy",
     "Select",
     "Star",
     "Statement",
+    "Table",
+    "TableRef",
     "TypedLiteral",
     "UnaryOp",
     "Update",

@@ -45,11 +45,15 @@ from tinydb.sql.ast import (
     DropTable,
     Expr,
     Insert,
+    Join,
+    JoinKind,
     Literal,
     OrderBy,
     Select,
     Star,
     Statement,
+    Table,
+    TableRef,
     TypedLiteral,
     UnaryOp,
     Update,
@@ -62,6 +66,12 @@ from tinydb.types.system import Column, TypeTag, parse_type_name
 _COMPARISON_OPS: frozenset = frozenset({"=", "!=", "<", "<=", ">", ">="})
 _ADDITIVE_OPS: frozenset = frozenset({"+", "-"})
 _MULTIPLICATIVE_OPS: frozenset = frozenset({"*", "/"})
+
+
+# REQ-JOIN-5: JOIN nesting depth cap.  The first JOIN sets depth 1; each
+# subsequent JOIN increments depth.  Wrapping it as a left-leaning tree
+# means the parser emits at most ``depth`` Join nodes.
+_JOIN_MAX_DEPTH: int = 5
 
 
 # Mapping from typed-literal keyword → (TypeTag, parser).  Each parser
@@ -396,7 +406,7 @@ class _Parser:
         self._expect_keyword("SELECT")
         columns = self._parse_select_columns()
         self._expect_keyword("FROM")
-        table_tok = self._expect_ident()
+        from_ref = self._parse_from_clause(depth=0)
         where: Optional[Expr] = None
         if self._match_keyword("WHERE"):
             where = self.parse_expr()
@@ -421,12 +431,154 @@ class _Parser:
         self._match_kind(TokenKind.SEMI)
         return Select(
             columns=columns,
-            table=table_tok.value,
+            from_=from_ref,
             where=where,
             order_by=order_by,
             limit=limit,
             offset=offset,
             group_by=group_by,
+        )
+
+    # --- FROM / JOIN (T-10.2..10.4) ----------------------------------
+
+    def _parse_from_clause(self, depth: int) -> TableRef:
+        """Parse a single-table or joined FROM clause.
+
+        ``depth`` is the number of Join wrappers already built around
+        ``left`` (0 for a bare table).  REQ-JOIN-5 caps it at
+        :data:`_JOIN_MAX_DEPTH`; the 6th Join would create a 6-level
+        nesting tree and triggers the error.
+        """
+        left = self._parse_table_ref()
+        while self._peek_is_join_start():
+            # The new Join will wrap ``left`` and become the new
+            # left; its depth is ``depth + 1``.  Reject before parsing.
+            if depth + 1 > _JOIN_MAX_DEPTH:
+                tok = self._peek()
+                raise ParseError(
+                    tok.line, tok.col,
+                    "JOIN nesting depth exceeds 5",
+                )
+            join = self._parse_one_join(left, depth=depth)
+            left = join
+            depth += 1
+        return left
+
+    def _peek_is_join_start(self) -> bool:
+        tok = self._peek()
+        if tok.kind is not TokenKind.KEYWORD:
+            return False
+        # Recognise ``[INNER|LEFT [OUTER]]? JOIN`` but NOT ``INNER``
+        # by itself or other keywords that merely happen to share the
+        # spelling.  We require the next non-trivia token to be JOIN.
+        if tok.value in ("INNER", "JOIN", "LEFT", "CROSS"):
+            return True
+        return False
+
+    def _parse_one_join(self, left: TableRef, depth: int) -> Join:
+        """Consume one ``[INNER|LEFT [OUTER]]? JOIN ...`` chunk.
+
+        ``depth`` is the depth at which this Join will sit; left-leaning
+        construction means the parent sees ``(left ⋈ right)`` as its
+        own left operand.  Caller increments depth after this returns.
+        """
+        # Optional JOIN-kind modifiers.  Order: [INNER|LEFT] OUTER? JOIN.
+        # We support the three forms called out in REQ-JOIN-1/2:
+        #   INNER JOIN | JOIN | LEFT JOIN | LEFT OUTER JOIN
+        kind = JoinKind.INNER  # default
+        if self._match_keyword("INNER"):
+            kind = JoinKind.INNER
+        elif self._match_keyword("LEFT"):
+            kind = JoinKind.LEFT
+            self._match_keyword("OUTER")  # optional
+        elif self._match_keyword("RIGHT"):
+            tok = self._peek()
+            raise ParseError(
+                tok.line, tok.col,
+                "RIGHT JOIN is not supported in v0.2",
+            )
+        elif self._match_keyword("FULL"):
+            tok = self._peek()
+            raise ParseError(
+                tok.line, tok.col,
+                "FULL JOIN is not supported in v0.2",
+            )
+        elif self._match_keyword("CROSS"):
+            tok = self._peek()
+            raise ParseError(
+                tok.line, tok.col,
+                "CROSS JOIN is not supported in v0.2",
+            )
+        # JOIN keyword is required.
+        self._expect_keyword("JOIN")
+        right = self._parse_table_ref()
+        on_expr, using_cols = self._parse_join_condition()
+        return Join(
+            left=left,
+            right=right,
+            kind=kind,
+            on_expr=on_expr,
+            using=using_cols,
+            nullable_right=(kind == JoinKind.LEFT),
+        )
+
+    def _parse_table_ref(self) -> TableRef:
+        """One ``[schema.]table [alias]`` reference — no JOIN clauses."""
+        name_tok = self._expect_ident()
+        alias: Optional[str] = None
+        # Accept optional AS keyword between name and alias: ``t AS u``.
+        self._match_keyword("AS")
+        nxt = self._peek()
+        if nxt.kind is TokenKind.IDENT and self._is_alias_position():
+            alias = self._advance().value
+        return Table(name=name_tok.value, alias=alias)
+
+    def _is_alias_position(self) -> bool:
+        """Heuristic: the next IDENT is an alias iff it's not a keyword.
+
+        This avoids stealing the keyword in ``WHERE`` / ``GROUP`` / etc.;
+        we peek one more token to see whether the IDENT is followed by
+        another clause-starting keyword (``AS``, ``ON``, ``USING``,
+        ``WHERE``, ``GROUP``, ``ORDER``, ``LIMIT``, ``SEMI``, ``EOF``).
+        """
+        # If the next token isn't an IDENT this is irrelevant.
+        if self._peek().kind is not TokenKind.IDENT:
+            return False
+        # Look one token ahead without consuming.
+        if self._pos + 1 >= len(self._toks):
+            return True
+        nxt = self._toks[self._pos + 1]
+        if nxt.kind is TokenKind.KEYWORD and nxt.value in (
+            "AS", "ON", "USING", "WHERE", "GROUP", "ORDER",
+            "LIMIT", "LEFT", "INNER", "JOIN", "RIGHT", "FULL",
+            "CROSS", "OUTER",
+        ):
+            return True
+        if nxt.kind is TokenKind.SEMI or nxt.kind is TokenKind.EOF:
+            return True
+        # Comma / RPAREN — end of FROM list or subexpr; not an alias.
+        return False
+
+    def _parse_join_condition(self) -> tuple:
+        """``ON <expr>`` or ``USING (col, col, ...)`` — exactly one.
+
+        Returns ``(on_expr, using_tuple)`` — exactly one is set; the
+        other is ``None`` / ``()``.  Missing both raises ParseError
+        (REQ-JOIN-1).
+        """
+        if self._match_keyword("ON"):
+            return (self.parse_expr(), ())
+        if self._match_keyword("USING"):
+            self._expect_kind(TokenKind.LPAREN)
+            cols = [self._expect_ident().value]
+            while self._match_kind(TokenKind.COMMA):
+                cols.append(self._expect_ident().value)
+            self._expect_kind(TokenKind.RPAREN)
+            return (None, tuple(cols))
+        tok = self._peek()
+        raise ParseError(
+            tok.line, tok.col,
+            "JOIN requires ON or USING clause",
         )
 
     def _parse_select_columns(self) -> tuple:
@@ -477,13 +629,19 @@ class _Parser:
         return tuple(items)
 
     def _parse_order_by_item(self) -> OrderBy:
+        # ORDER BY <col> [ASC|DESC] — accept both bare and qualified
+        # (``alias.col``) column refs so JOIN queries work.
         col_tok = self._expect_ident()
+        col_name = col_tok.value
+        if self._match_kind(TokenKind.DOT):
+            inner = self._expect_ident()
+            col_name = inner.value
         descending = False
         if self._match_keyword("DESC"):
             descending = True
         elif self._match_keyword("ASC"):
             descending = False  # explicit ASC; default already False
-        return OrderBy(column=col_tok.value, descending=descending)
+        return OrderBy(column=col_name, descending=descending)
 
     def _parse_ident_list(self) -> tuple:
         """Comma-separated IDENT list — used by GROUP BY and similar."""

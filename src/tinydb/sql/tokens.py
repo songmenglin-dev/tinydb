@@ -99,6 +99,7 @@ KEYWORDS: frozenset = frozenset({
     "TRUE", "FALSE",
     # Joins (out of v0.1 scope but reserved for future)
     "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL",
+    "CROSS", "USING",
     # Type names (used in CREATE TABLE column defs)
     "INT", "INTEGER", "FLOAT", "DOUBLE", "REAL", "TEXT", "VARCHAR",
     "BOOL", "BOOLEAN", "DATE", "TIME", "DATETIME", "TIMESTAMP",
