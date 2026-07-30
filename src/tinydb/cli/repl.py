@@ -8,7 +8,9 @@ flavours route through the same SQL path.
 v0.3: ``run_repl`` now accepts either a :class:`Database` or a
 :class:`tinydb.cli.backend.Backend`.  When a backend is given the
 REPL delegates SQL execution to it (which may be the in-process
-database or a remote client).
+database or a remote client).  Server-aware meta commands
+(``.connect`` / ``.disconnect`` / ``.status`` / ``.server-info``)
+are dispatched by :func:`tinydb.cli.commands.dispatch_server_meta`.
 """
 from __future__ import annotations
 
@@ -19,6 +21,7 @@ from typing import Callable, List, Optional, Union
 
 from tinydb.api import Database
 from tinydb.cli.backend import Backend, BackendResult, FileBackend
+from tinydb.cli.commands import ConnectionState, dispatch_server_meta
 from tinydb.cli.format import (
     ColumnMeta,
     format_line_mode,
@@ -48,6 +51,33 @@ def _default_output(line: str) -> None:
 def _default_input(prompt: str) -> str:
     import builtins
     return builtins.input(prompt)
+
+
+# --- combined meta-dispatch --------------------------------------------
+
+
+def _dispatch_all_meta(
+    line: str,
+    state: ConnectionState,
+    db: Optional[Database],
+    output: OutputFn,
+    *,
+    mode: Optional[List[str]] = None,
+) -> Optional[str]:
+    """Try server-meta first, then database-meta.
+
+    Returns ``None`` if the line is plain SQL; otherwise one of
+    ``"handled"`` / ``"exit"``.
+    """
+    handled = dispatch_server_meta(line, state, output)
+    if handled is not None:
+        return handled
+    if db is not None:
+        return dispatch_meta(line, db, output, mode=mode)
+    return None
+
+
+# --- continuation detection (REQ-CLI-1/2) --------------------------------
 
 
 # --- meta-command dispatch (REQ-CLI-6..10) ------------------------------
@@ -320,6 +350,7 @@ def _run_prompt_toolkit_repl(backend: Union[Database, Backend]) -> int:  # pragm
     db = backend._db if isinstance(backend, FileBackend) else (
         backend if isinstance(backend, Database) else None
     )
+    state = ConnectionState(backend)
 
     buffer = ""
     while True:
@@ -339,13 +370,14 @@ def _run_prompt_toolkit_repl(backend: Union[Database, Backend]) -> int:  # pragm
                 buffer = ""
                 if not line:
                     continue
-                if db is not None:
-                    handled = dispatch_meta(line, db, _default_output, mode=mode)
-                    if handled == "exit":
-                        return 0
-                    if handled == "handled":
-                        continue
-                _execute_sql(line, backend, _default_output, mode=mode[0])
+                handled = _dispatch_all_meta(
+                    line, state, db, _default_output, mode=mode
+                )
+                if handled == "exit":
+                    return 0
+                if handled == "handled":
+                    continue
+                _execute_sql(line, state.backend, _default_output, mode=mode[0])
             continue
         if buffer:
             buffer = buffer[:-1] if buffer.endswith("\\") else buffer
@@ -357,13 +389,14 @@ def _run_prompt_toolkit_repl(backend: Union[Database, Backend]) -> int:  # pragm
             buffer = ""
             if not line:
                 continue
-            if db is not None:
-                handled = dispatch_meta(line, db, _default_output, mode=mode)
-                if handled == "exit":
-                    return 0
-                if handled == "handled":
-                    continue
-            _execute_sql(line, backend, _default_output, mode=mode[0])
+            handled = _dispatch_all_meta(
+                line, state, db, _default_output, mode=mode
+            )
+            if handled == "exit":
+                return 0
+            if handled == "handled":
+                continue
+            _execute_sql(line, state.backend, _default_output, mode=mode[0])
 
 
 # --- cmd-fallback REPL (v0.1 path) --------------------------------------
@@ -378,6 +411,7 @@ def _run_cmd_fallback(backend: Union[Database, Backend]) -> int:
     db = backend._db if isinstance(backend, FileBackend) else (
         backend if isinstance(backend, Database) else None
     )
+    state = ConnectionState(backend)
 
     class _CmdShell:
         def __init__(
@@ -385,10 +419,12 @@ def _run_cmd_fallback(backend: Union[Database, Backend]) -> int:
             backend: Union[Database, Backend],
             output: OutputFn,
             db: Optional[Database],
+            state: ConnectionState,
         ) -> None:
             self.backend = backend
             self.db = db
             self.output = output
+            self.state = state
             self.mode = "table"
 
         def _emit(self, line: str) -> None:
@@ -405,15 +441,16 @@ def _run_cmd_fallback(backend: Union[Database, Backend]) -> int:
                 line = raw.strip()
                 if not line:
                     continue
-                if self.db is not None:
-                    handled = dispatch_meta(line, self.db, self._emit, mode=[self.mode])
-                    if handled == "exit":
-                        return 0
-                    if handled == "handled":
-                        continue
+                handled = _dispatch_all_meta(
+                    line, self.state, self.db, self._emit, mode=[self.mode]
+                )
+                if handled == "exit":
+                    return 0
+                if handled == "handled":
+                    continue
                 _execute_sql(line, self.backend, self._emit, mode=self.mode)
 
-    return _CmdShell(backend, _default_output, db).run()
+    return _CmdShell(backend, _default_output, db, state).run()
 
 
 # --- public entry point -------------------------------------------------
@@ -447,6 +484,7 @@ def _run_legacy(backend: Union[Database, Backend], input_fn: InputFn, output: Ou
     db = backend._db if isinstance(backend, FileBackend) else (
         backend if isinstance(backend, Database) else None
     )
+    state = ConnectionState(backend)
     buffer = ""
     while True:
         try:
@@ -464,13 +502,14 @@ def _run_legacy(backend: Union[Database, Backend], input_fn: InputFn, output: Ou
         buffer = ""
         if not line:
             continue
-        if db is not None:
-            handled = dispatch_meta(line, db, output, mode=mode_holder)
-            if handled == "exit":
-                return 0
-            if handled == "handled":
-                continue
-        _execute_sql(line, backend, output, mode=mode_holder[0])
+        handled = _dispatch_all_meta(
+            line, state, db, output, mode=mode_holder
+        )
+        if handled == "exit":
+            return 0
+        if handled == "handled":
+            continue
+        _execute_sql(line, state.backend, output, mode=mode_holder[0])
 
 
 __all__ = [
@@ -479,4 +518,6 @@ __all__ = [
     "dispatch_meta",
     "run_repl",
     "_HAS_PT",
+    "_dispatch_all_meta",
+    "ConnectionState",
 ]

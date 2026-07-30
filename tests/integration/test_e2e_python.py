@@ -55,6 +55,7 @@ def _start_server(config: ServerConfig):
     return thread, stop
 
 
+@pytest.mark.network
 class TestEndToEnd:
     """Full stack: server -> client -> SQL -> on-disk."""
 

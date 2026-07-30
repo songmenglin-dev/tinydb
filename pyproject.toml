@@ -49,4 +49,6 @@ markers = [
     "integration: marks tests that touch real storage / disk",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "crash: marks recovery / fuzz tests that simulate crashes",
+    "network: marks tests that require a network socket / spawn server",
+    "asyncio: marks async tests (executed via anyio/asyncio)",
 ]
