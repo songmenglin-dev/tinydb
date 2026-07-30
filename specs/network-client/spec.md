@@ -1,6 +1,6 @@
-# Spec: Python Client 客户端库（v0.3）
+# network-client
 
-## ADDED Requirements
+## Requirements
 
 ### REQ-CLI-1: 同步 Client 构造
 The system MUST 提供 `tinydb.client.Client(host, port, *, database=None, connect_timeout=5.0, heartbeat=True)`，构造时同步建立 TCP 连接并完成 HELLO 握手。
@@ -129,7 +129,3 @@ The system MUST 提供 `tinydb.client.Pool(host, port, *, size=4)`，实现简�
 - WHEN `with pool.acquire() as c:` 退出块
 - THEN 连接归还池
 - AND 下一个 `pool.acquire()` 命中归还的连接（无需新建 TCP）
----
-
-> **合并说明**：本 spec 是 `changes/tinydb-v0.3/specs/network-client/spec.md`（v0.3 ADDED 要求）的合并版本，作为主 spec 的权威版本。原始 delta 仍保留在各自 change 目录作为归档。
-

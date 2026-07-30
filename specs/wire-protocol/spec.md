@@ -1,6 +1,6 @@
-# Spec: Wire Protocol（v0.3）
+# wire-protocol
 
-## ADDED Requirements
+## Requirements
 
 ### REQ-PROTO-1: 帧格式
 The system MUST 使用长度前缀帧：每个帧由 `[LEN(4B BE)][TYPE(1B)][FLAGS(1B)][PAYLOAD(LEN-2 字节)]` 组成；最大帧长度 `16777215`（`0xFFFFFF`）；超过限制的帧视为协议错误并关闭连接。
@@ -148,7 +148,3 @@ The system MUST 支持 QUIT 帧；server 收到 QUIT 后回 OK 然后关闭 sock
 - WHEN 客户端发 QUIT
 - THEN server 回 OK 后关闭 socket
 - AND 客户端在下一次 recv 时收到 EOF
----
-
-> **合并说明**：本 spec 是 `changes/tinydb-v0.3/specs/wire-protocol/spec.md`（v0.3 ADDED 要求）的合并版本，作为主 spec 的权威版本。原始 delta 仍保留在各自 change 目录作为归档。
-

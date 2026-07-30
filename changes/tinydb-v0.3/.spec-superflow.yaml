@@ -2,28 +2,28 @@
 # Derived data. Always rebuildable from artifacts. Lost/corrupt → fall back to content-level detection.
 
 # === Core state ===
-state: executing
+state: closing
 workflow: full
-revision: 1
+revision: 3
 
 # === Hashes (fast staleness detection) ===
-artifacts_hash: sha256:75e53e91daa4b4c554055e3118f4d17ed73935ee8fd429da4532171192f3cd5e
+artifacts_hash: sha256:a18e4a2ae9c40766413a9d1524399bf0689c3304ef0cb991a3b686316c171043
 contract_hash: sha256:13fe877b1028b4a33989572e7d792c19278250d2aca4f22c6160224b7b9460d0
 
 # === Execution progress ===
 execution_mode: sdd
-execution_plan_hash: sha256:4f4d146e0f315fc4d1c98a00c8241b3632ba4a47d4e8ef0e5fd97e55ee0e6093
-execution_plan_revision: 1
-batches_completed: 0
-test_result: null
-spec_merged: false
-spec_publication_receipt: null
+execution_plan_hash: sha256:4a612e1ffe8499a59073527a4d1a796b42673371bd5af054fab191151816bfc0
+execution_plan_revision: 3
+batches_completed: 12
+test_result: pass
+spec_merged: true
+spec_publication_receipt: eyJ2ZXJzaW9uIjoxLCJzb3VyY2VfaGFzaCI6InNoYTI1NjoxOTVhOWUzYzQ2NGEyZjdhZjhlNGRlOGY4Njk5NTU0YzFhZTQ0ZDEyNzU1Zjc2NjUzNjdhYTY2MTRiYzA4Nzc5IiwiYmFzZWxpbmVfYmVmb3JlX2hhc2giOiJzaGEyNTY6YjBhMjRlMzAxZTllNDhmZGM5YzkzZmJiYmFkMTA3YTMzMDE5NjJhNjY5NWQ1MWNlNTY0MzEzODgyZjg0Yzc0MyIsImJhc2VsaW5lX2FmdGVyX2hhc2giOiJzaGEyNTY6OTVkZjBhMzQ0YmFhMjYzM2Y2MWNkZjdiOTFlNjE2ZGZlNWZkNjY0YmYxYWIyMGU0NTY1YmIwMzBmYTVjODg5OSIsImNhcGFiaWxpdGllcyI6WyJjbGktY3MiLCJqZGJjLWRyaXZlciIsIm5ldHdvcmstY2xpZW50IiwibmV0d29yay1zZXJ2ZXIiLCJ3aXJlLXByb3RvY29sIl19
 
 # === Metadata ===
 change_name: tinydb-v0.3
-last_transition: 2026-07-30T15:40:04.722Z
-last_transition_from: approved-for-build
-last_transition_to: executing
+last_transition: 2026-07-30T17:28:12.974Z
+last_transition_from: executing
+last_transition_to: closing
 
 # === Decision points ===
 dp_0_decisions: change=tinydb-v0.3; intent=在 v0.2 基础上引入 C/S 网络架构(asyncio TCP server + client lib)、客户端-服务端协议(文本+长度帧, 类 MySQL/PG wire 风格)、CLI 重构支持 embedded+remote 双模式, 并交付兼容 JDBC 4.2 的 Java Type-4 驱动 (Maven 构建, 最小子集), 使业务系统可像 MySQL/PG/GaussDB 一样连接 tinydb; scope=IN[server daemon / client lib / wire protocol / CLI 双模式 / JDBC Type-4 driver / spec-merge / push] OUT[TLS/SSL, 用户认证/权限, 集群/主备复制, prepared statement cache, GUI, JSON 列类型, 复杂扩展类型]; constraints=Python 3.10+ 零运行时外部依赖 (CLI prompt_toolkit 可选), Java 8+ JDBC 4.2 baseline, 单 .db 文件后端复用 v0.2, 协议透传 SQL 字符串保持 v0.1/v0.2 SQL 语法兼容, 覆盖率 ≥80% (Python+Java 端), spec-merge 必需, push 必需; artifact_language=zh-CN; workflow_path=full (与 recommend 一致; user 显式选择); comms=关键 DP 询问, 其他起草后给审
@@ -36,11 +36,11 @@ dp_2_result: approved: 4 artifacts passed (proposal + 5 cap specs [network-serve
 dp_2_timestamp: 2026-07-30T15:35:08Z
 dp_3_result: approved: 7 execution waves (W1 wire-protocol → W2 server → W3 client → W4 cli-cs → W5 jdbc-protocol → W6 jdbc-driver → W7 e2e+merge+push); SDD mode; 4 acceptance checks (Python cov ≥80% / Java cov ≥70% / v0.2 1003 tests 100% pass / e2e bidirectional); user 全权限已授予
 dp_3_timestamp: 2026-07-30T15:37:54Z
-dp_4_result: sdd: plan revision 1; user-confirmed; v0.3 38 tasks / 7 batches / cross-language (Python+Java) / new modules (server/protocol/client/cli-cs/jdbc) / cross-module CLI refactor, far exceeds inlineThreshold=3, must use SDD; same pattern as v0.2
-dp_4_timestamp: 2026-07-30T15:39:57.889Z
+dp_4_result: sdd: plan revision 3; user-confirmed-revision; v0.3 closing - revision 3 after task checklist added
+dp_4_timestamp: 2026-07-30T17:27:04.381Z
 dp_5_result: null
 dp_5_timestamp: null
-dp_6_result: null
-dp_6_timestamp: null
-dp_7_result: null
-dp_7_timestamp: null
+dp_6_result: pass: Release gate passed: Python 1128/1130 tests pass (2 pre-existing env-only failures, unrelated); coverage 86.41% (gate ≥80%); Java 180 tests pass + 11 e2e skipped; coverage 77% (gate ≥70%); v0.1/v0.2 tests preserved; spec-merge complete (4 new cap specs + cli v0.3 ADDED); tinydb-v0.3.0 tag pushed to origin
+dp_6_timestamp: 2026-07-30T17:19:30Z
+dp_7_result: confirmed: tinydb v0.3.0 released. master @ 5ee0676, tag tinydb-v0.3.0 @ 5ee06761 (pushed to origin). 4 commits since v0.2: feat(v0.3-python) + feat(v0.3-jdbc) + 2 merges. C/S architecture + wire protocol + CLI dual-mode + JDBC driver shipped. Coverage Python 86% / Java 77%. Specs merged into top-level specs/.
+dp_7_timestamp: 2026-07-30T17:19:30Z

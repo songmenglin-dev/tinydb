@@ -1,6 +1,6 @@
-# Spec: JDBC Driver 兼容 JAR（v0.3）
+# jdbc-driver
 
-## ADDED Requirements
+## Requirements
 
 ### REQ-JDBC-1: Driver 注册
 The system MUST 提供 `org.tinydb.jdbc.TinyDriver` 实现 `java.sql.Driver`；通过 `META-INF/services/java.sql.Driver` 文件自动注册；URL 前缀 `jdbc:tinydb://` 触发本驱动处理。
@@ -198,7 +198,3 @@ The system MUST 在 JUnit 测试套件中提供 `EndToEndTest`，通过 `Process
 - WHEN JDBC 客户端跑 SELECT/INSERT/UPDATE/DELETE/COMMIT/ROLLBACK
 - THEN 所有断言通过
 - AND tearDown 关闭 server 进程 + 删除临时 db
----
-
-> **合并说明**：本 spec 是 `changes/tinydb-v0.3/specs/jdbc-driver/spec.md`（v0.3 ADDED 要求）的合并版本，作为主 spec 的权威版本。原始 delta 仍保留在各自 change 目录作为归档。
-

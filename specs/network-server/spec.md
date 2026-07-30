@@ -1,6 +1,6 @@
-# Spec: tinydb-server 网络守护进程（v0.3）
+# network-server
 
-## ADDED Requirements
+## Requirements
 
 ### REQ-SRV-1: 启动守护进程
 The system MUST 提供 `tinydb-server` 命令行入口，参数 `--host`/`-H`（默认 `127.0.0.1`）、`--port`/`-p`（默认 `8520`，范围 `1..65535`）、`--db-path`（必填，待服务的 .db 文件）、`--max-conns`（默认 `64`）、`--idle-timeout`（秒，默认 `1800`），启动后打印 `[server] listening on <host>:<port>` 并进入事件循环。
@@ -103,7 +103,3 @@ The system MUST 输出结构化日志到 stdout，每行 `[server] <ISO8601> <LE
 - WHEN 客户端发非法帧
 - THEN stdout 输出 `[server] ... WARN conn=<id> protocol error: ...`
 - AND 连接被关闭
----
-
-> **合并说明**：本 spec 是 `changes/tinydb-v0.3/specs/network-server/spec.md`（v0.3 ADDED 要求）的合并版本，作为主 spec 的权威版本。原始 delta 仍保留在各自 change 目录作为归档。
-
