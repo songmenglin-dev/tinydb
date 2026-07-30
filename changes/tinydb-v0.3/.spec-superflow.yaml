@@ -1,0 +1,46 @@
+# .spec-superflow.yaml — lightweight state machine
+# Derived data. Always rebuildable from artifacts. Lost/corrupt → fall back to content-level detection.
+
+# === Core state ===
+state: executing
+workflow: full
+revision: 1
+
+# === Hashes (fast staleness detection) ===
+artifacts_hash: sha256:75e53e91daa4b4c554055e3118f4d17ed73935ee8fd429da4532171192f3cd5e
+contract_hash: sha256:13fe877b1028b4a33989572e7d792c19278250d2aca4f22c6160224b7b9460d0
+
+# === Execution progress ===
+execution_mode: sdd
+execution_plan_hash: sha256:4f4d146e0f315fc4d1c98a00c8241b3632ba4a47d4e8ef0e5fd97e55ee0e6093
+execution_plan_revision: 1
+batches_completed: 0
+test_result: null
+spec_merged: false
+spec_publication_receipt: null
+
+# === Metadata ===
+change_name: tinydb-v0.3
+last_transition: 2026-07-30T15:40:04.722Z
+last_transition_from: approved-for-build
+last_transition_to: executing
+
+# === Decision points ===
+dp_0_decisions: change=tinydb-v0.3; intent=在 v0.2 基础上引入 C/S 网络架构(asyncio TCP server + client lib)、客户端-服务端协议(文本+长度帧, 类 MySQL/PG wire 风格)、CLI 重构支持 embedded+remote 双模式, 并交付兼容 JDBC 4.2 的 Java Type-4 驱动 (Maven 构建, 最小子集), 使业务系统可像 MySQL/PG/GaussDB 一样连接 tinydb; scope=IN[server daemon / client lib / wire protocol / CLI 双模式 / JDBC Type-4 driver / spec-merge / push] OUT[TLS/SSL, 用户认证/权限, 集群/主备复制, prepared statement cache, GUI, JSON 列类型, 复杂扩展类型]; constraints=Python 3.10+ 零运行时外部依赖 (CLI prompt_toolkit 可选), Java 8+ JDBC 4.2 baseline, 单 .db 文件后端复用 v0.2, 协议透传 SQL 字符串保持 v0.1/v0.2 SQL 语法兼容, 覆盖率 ≥80% (Python+Java 端), spec-merge 必需, push 必需; artifact_language=zh-CN; workflow_path=full (与 recommend 一致; user 显式选择); comms=关键 DP 询问, 其他起草后给审
+dp_0_result: confirmed
+dp_0_confirmed: true
+dp_0_timestamp: 2026-07-30T15:02:36Z
+dp_1_result: null
+dp_1_timestamp: null
+dp_2_result: approved: 4 artifacts passed (proposal + 5 cap specs [network-server/network-client/wire-protocol/cli-cs/jdbc-driver] covering 40 REQs with SHALL/MUST + WHEN/THEN scenarios + design 10 decisions D-1..D-10 + 3 risks + tasks 7 batches 38 tasks with TDD phases + file structure + interfaces)
+dp_2_timestamp: 2026-07-30T15:35:08Z
+dp_3_result: approved: 7 execution waves (W1 wire-protocol → W2 server → W3 client → W4 cli-cs → W5 jdbc-protocol → W6 jdbc-driver → W7 e2e+merge+push); SDD mode; 4 acceptance checks (Python cov ≥80% / Java cov ≥70% / v0.2 1003 tests 100% pass / e2e bidirectional); user 全权限已授予
+dp_3_timestamp: 2026-07-30T15:37:54Z
+dp_4_result: sdd: plan revision 1; user-confirmed; v0.3 38 tasks / 7 batches / cross-language (Python+Java) / new modules (server/protocol/client/cli-cs/jdbc) / cross-module CLI refactor, far exceeds inlineThreshold=3, must use SDD; same pattern as v0.2
+dp_4_timestamp: 2026-07-30T15:39:57.889Z
+dp_5_result: null
+dp_5_timestamp: null
+dp_6_result: null
+dp_6_timestamp: null
+dp_7_result: null
+dp_7_timestamp: null

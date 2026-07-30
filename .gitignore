@@ -54,3 +54,6 @@ coverage.xml
 *.db-wal
 *.db-wal-shm
 *.wal
+
+# spec-superflow worktrees
+.claude/worktrees/

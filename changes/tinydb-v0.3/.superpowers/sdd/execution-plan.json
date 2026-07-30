@@ -1,0 +1,283 @@
+{
+  "mode": "sdd",
+  "source": "user-confirmed",
+  "rationale": "v0.3 38 tasks / 7 batches / cross-language (Python+Java) / new modules (server/protocol/client/cli-cs/jdbc) / cross-module CLI refactor, far exceeds inlineThreshold=3, must use SDD; same pattern as v0.2",
+  "waves": [
+    {
+      "id": "W1",
+      "strategy": "parallel",
+      "tasks": [
+        "T-1.1",
+        "T-1.2",
+        "T-1.3",
+        "T-1.4",
+        "T-1.5"
+      ],
+      "depends_on": []
+    },
+    {
+      "id": "W2",
+      "strategy": "parallel",
+      "tasks": [
+        "T-2.1",
+        "T-2.2",
+        "T-2.3",
+        "T-2.4",
+        "T-2.5",
+        "T-2.6",
+        "T-2.7"
+      ],
+      "depends_on": [
+        "W1"
+      ]
+    },
+    {
+      "id": "W3",
+      "strategy": "parallel",
+      "tasks": [
+        "T-3.1",
+        "T-3.2",
+        "T-3.3",
+        "T-3.4",
+        "T-3.5",
+        "T-3.6",
+        "T-3.7",
+        "T-3.8"
+      ],
+      "depends_on": [
+        "W1"
+      ]
+    },
+    {
+      "id": "W4",
+      "strategy": "parallel",
+      "tasks": [
+        "T-4.1",
+        "T-4.2",
+        "T-4.3",
+        "T-4.4",
+        "T-4.5",
+        "T-4.6"
+      ],
+      "depends_on": [
+        "W3"
+      ]
+    },
+    {
+      "id": "W5",
+      "strategy": "parallel",
+      "tasks": [
+        "T-5.1",
+        "T-5.2",
+        "T-5.3",
+        "T-5.4"
+      ],
+      "depends_on": [
+        "W1"
+      ]
+    },
+    {
+      "id": "W6",
+      "strategy": "parallel",
+      "tasks": [
+        "T-6.1",
+        "T-6.2",
+        "T-6.3",
+        "T-6.4",
+        "T-6.5",
+        "T-6.6",
+        "T-6.7"
+      ],
+      "depends_on": [
+        "W5"
+      ]
+    },
+    {
+      "id": "W7",
+      "strategy": "serial",
+      "tasks": [
+        "T-7.1",
+        "T-7.2",
+        "T-7.3",
+        "T-7.4",
+        "T-7.5"
+      ],
+      "depends_on": [
+        "W2",
+        "W3",
+        "W4",
+        "W5",
+        "W6"
+      ]
+    }
+  ],
+  "artifacts_hash": "sha256:75e53e91daa4b4c554055e3118f4d17ed73935ee8fd429da4532171192f3cd5e",
+  "contract_hash": "sha256:13fe877b1028b4a33989572e7d792c19278250d2aca4f22c6160224b7b9460d0",
+  "workflow": "full",
+  "revision": 1,
+  "recommendation": {
+    "available_modes": [
+      "inline",
+      "batch-inline",
+      "sdd"
+    ],
+    "recommendation": {
+      "mode": "sdd",
+      "reasons": [
+        "The declared execution waves include parallel work, which SDD can dispatch and review independently."
+      ]
+    },
+    "facts": {
+      "workflow": "full",
+      "documented_task_count": 0,
+      "planned_task_count": 42,
+      "planned_wave_count": 7,
+      "has_parallel_wave": true,
+      "inline_threshold": 3
+    }
+  },
+  "recommendation_receipt": {
+    "recommendation": {
+      "available_modes": [
+        "inline",
+        "batch-inline",
+        "sdd"
+      ],
+      "recommendation": {
+        "mode": "sdd",
+        "reasons": [
+          "The declared execution waves include parallel work, which SDD can dispatch and review independently."
+        ]
+      },
+      "facts": {
+        "workflow": "full",
+        "documented_task_count": 0,
+        "planned_task_count": 42,
+        "planned_wave_count": 7,
+        "has_parallel_wave": true,
+        "inline_threshold": 3
+      }
+    },
+    "waves": [
+      {
+        "id": "W1",
+        "strategy": "parallel",
+        "tasks": [
+          "T-1.1",
+          "T-1.2",
+          "T-1.3",
+          "T-1.4",
+          "T-1.5"
+        ],
+        "depends_on": []
+      },
+      {
+        "id": "W2",
+        "strategy": "parallel",
+        "tasks": [
+          "T-2.1",
+          "T-2.2",
+          "T-2.3",
+          "T-2.4",
+          "T-2.5",
+          "T-2.6",
+          "T-2.7"
+        ],
+        "depends_on": [
+          "W1"
+        ]
+      },
+      {
+        "id": "W3",
+        "strategy": "parallel",
+        "tasks": [
+          "T-3.1",
+          "T-3.2",
+          "T-3.3",
+          "T-3.4",
+          "T-3.5",
+          "T-3.6",
+          "T-3.7",
+          "T-3.8"
+        ],
+        "depends_on": [
+          "W1"
+        ]
+      },
+      {
+        "id": "W4",
+        "strategy": "parallel",
+        "tasks": [
+          "T-4.1",
+          "T-4.2",
+          "T-4.3",
+          "T-4.4",
+          "T-4.5",
+          "T-4.6"
+        ],
+        "depends_on": [
+          "W3"
+        ]
+      },
+      {
+        "id": "W5",
+        "strategy": "parallel",
+        "tasks": [
+          "T-5.1",
+          "T-5.2",
+          "T-5.3",
+          "T-5.4"
+        ],
+        "depends_on": [
+          "W1"
+        ]
+      },
+      {
+        "id": "W6",
+        "strategy": "parallel",
+        "tasks": [
+          "T-6.1",
+          "T-6.2",
+          "T-6.3",
+          "T-6.4",
+          "T-6.5",
+          "T-6.6",
+          "T-6.7"
+        ],
+        "depends_on": [
+          "W5"
+        ]
+      },
+      {
+        "id": "W7",
+        "strategy": "serial",
+        "tasks": [
+          "T-7.1",
+          "T-7.2",
+          "T-7.3",
+          "T-7.4",
+          "T-7.5"
+        ],
+        "depends_on": [
+          "W2",
+          "W3",
+          "W4",
+          "W5",
+          "W6"
+        ]
+      }
+    ],
+    "artifacts_hash": "sha256:75e53e91daa4b4c554055e3118f4d17ed73935ee8fd429da4532171192f3cd5e",
+    "contract_hash": "sha256:13fe877b1028b4a33989572e7d792c19278250d2aca4f22c6160224b7b9460d0",
+    "workflow": "full",
+    "execution_plan_revision_at_recommendation": null,
+    "created_at": "2026-07-30T15:39:52.152Z",
+    "hash": "sha256:666266c90d7e2db8a4a776aa0df8d1dc46dd651935231c6c07135b2c5fda06cd"
+  },
+  "selection": {
+    "confirmed": true,
+    "followed_recommendation": true,
+    "acknowledged_non_recommendation": false
+  },
+  "hash": "sha256:4f4d146e0f315fc4d1c98a00c8241b3632ba4a47d4e8ef0e5fd97e55ee0e6093"
+}

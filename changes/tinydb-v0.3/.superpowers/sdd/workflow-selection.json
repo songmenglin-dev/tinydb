@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "available_modes": [
+    "full",
+    "hotfix",
+    "tweak",
+    "quick"
+  ],
+  "facts": {
+    "task_count": 90,
+    "file_count": 50,
+    "config_doc_only": "no",
+    "schema_api_change": "yes",
+    "new_module": "yes",
+    "behavioral_constraint_change": "yes",
+    "cross_module_change": "yes",
+    "uncertainty": "high",
+    "request_kind": "standard"
+  },
+  "missing_facts": [],
+  "status": "ready",
+  "recommendation": {
+    "mode": "full",
+    "reasons": [
+      "Risk signals require the user to choose Quick or Full."
+    ],
+    "risk_reasons": [
+      "behavioral constraint changed (PRD, spec, design, data, or permission)",
+      "schema or API changes",
+      "new module",
+      "cross-module change",
+      "high uncertainty"
+    ]
+  },
+  "created_at": "2026-07-30T15:01:18.614Z",
+  "selection": {
+    "mode": "full",
+    "reason": "user explicit choice: v0.3 迭代涉及跨语言(C/S 网络层 + Java JDBC) + 新模块(server/protocol/jdbc) + 新 API/Schema + 跨模块 CLI 重构 + 行为约束变更,远超 Quick/Hotfix/Tweak 上限;走完整 full workflow",
+    "followed_recommendation": true,
+    "acknowledged_non_recommendation": false,
+    "accepted_automatically": false,
+    "risk_override": false,
+    "verification_strategy": null,
+    "selected_at": "2026-07-30T15:01:33.887Z"
+  },
+  "hash": "sha256:38c88b305dfa2238c6122f7afe38ae3beaae08e421cd0651a6c59b9c1cc09b83"
+}
