@@ -1,22 +1,24 @@
-"""tinydb CLI — REPL (v0.2).
+"""tinydb CLI - REPL (v0.2/v0.3).
 
 v0.1 used :mod:`cmd`.  v0.2 adds a ``prompt_toolkit``-backed REPL
 when the optional dependency is installed and falls back to ``cmd``
 otherwise.  Meta-commands live in :func:`dispatch_meta` so both REPL
 flavours route through the same SQL path.
 
-The injected ``input_fn`` / ``output`` (legacy) interface still works
-for unit tests; the prompt_toolkit path is reached when the caller does
-NOT inject ``input_fn``.
+v0.3: ``run_repl`` now accepts either a :class:`Database` or a
+:class:`tinydb.cli.backend.Backend`.  When a backend is given the
+REPL delegates SQL execution to it (which may be the in-process
+database or a remote client).
 """
 from __future__ import annotations
 
 import importlib.util
 import sys
 import time
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 from tinydb.api import Database
+from tinydb.cli.backend import Backend, BackendResult, FileBackend
 from tinydb.cli.format import (
     ColumnMeta,
     format_line_mode,
@@ -63,12 +65,7 @@ _HELP_TEXT: str = (
 
 
 def dispatch_meta(line: str, db: Database, output: OutputFn, *, mode: Optional[List[str]] = None) -> Optional[str]:
-    """Dispatch a single REPL line as a meta-command.
-
-    Returns ``None`` if the line is not a meta-command (caller continues
-    with the SQL path); ``"exit"`` if the REPL should terminate;
-    ``"handled"`` otherwise.
-    """
+    """Dispatch a single REPL line as a meta-command."""
     stripped = line.strip()
     if not stripped.startswith("."):
         return None
@@ -93,7 +90,6 @@ def dispatch_meta(line: str, db: Database, output: OutputFn, *, mode: Optional[L
         return "handled"
     if cmd == ".schema":
         if not arg:
-            # v0.1 behavior: dump every table (no argument required).
             names = db.list_tables()
             if not names:
                 output("(no tables)")
@@ -164,13 +160,6 @@ def _is_continuation(buffer: str) -> bool:
     """True when ``buffer`` ends with `\\` or contains unclosed quotes."""
     if buffer.endswith("\\"):
         return True
-    # Naive quote tracker: count single and double quotes that are NOT
-    # escaped.  Doubled quotes inside a string ('') are an SQL-standard
-    # escape, but they still count as TWO opens from the perspective of
-    # raw byte counting; we therefore only treat an odd count of `'` as
-    # an open string (so '' -> '' -> even -> closed).  Since SQL doubles
-    # quotes inside a single literal, an even count means we are
-    # balanced.
     if buffer.count("'") % 2 == 1:
         return True
     if buffer.count('"') % 2 == 1:
@@ -222,7 +211,7 @@ def _column_types_for_select(stmt: Select, db: Database) -> List[str]:
 
 def _execute_sql(
     line: str,
-    db: Database,
+    backend: Union[Database, Backend],
     output: OutputFn,
     *,
     mode: str,
@@ -237,28 +226,33 @@ def _execute_sql(
         history_sink(line)
     if isinstance(stmt, (CreateTable, DropTable)):
         try:
-            db.execute(line)
+            if isinstance(backend, Backend):
+                backend.execute(line)
+            else:
+                backend.execute(line)
         except TinydbError as exc:
             output(f"Error: {exc}")
             return
         output("OK")
         return
     is_select = isinstance(stmt, Select)
-    try:
-        columns: Optional[List[str]] = None
-        types: List[str] = []
-        if is_select:
-            try:
-                columns = result_columns(_plan(stmt, db.catalog, db.executor.indexer))
-            except TinydbError:
-                columns = None
+    columns: Optional[List[str]] = None
+    types: List[str] = []
+    if is_select and isinstance(backend, Database):
+        try:
+            columns = result_columns(_plan(stmt, backend.catalog, backend.executor.indexer))
             if columns:
-                types = _column_types_for_select(stmt, db)
-    except TinydbError:
-        columns = None
+                types = _column_types_for_select(stmt, backend)
+        except TinydbError:
+            columns = None
     t0 = time.perf_counter()
     try:
-        rows = db.execute(line)
+        if isinstance(backend, Backend):
+            result = backend.execute(line)
+            elapsed = time.perf_counter() - t0
+            _emit_backend_result(result, output, mode=mode)
+            return
+        rows = backend.execute(line)
     except TinydbError as exc:
         output(f"Error: {exc}")
         return
@@ -275,10 +269,31 @@ def _execute_sql(
     output(_render_select(rows, columns, types, mode, elapsed=elapsed))
 
 
+def _emit_backend_result(
+    result: BackendResult, output: OutputFn, *, mode: str
+) -> None:
+    if not result.is_select:
+        output(f"{result.rowcount} row(s)")
+        return
+    if not result.rows:
+        output(format_timing(0, result.elapsed))
+        return
+    metas = [
+        ColumnMeta(name=n, type_name=t)
+        for n, t in zip(result.columns, result.column_types)
+    ]
+    if mode == "line":
+        body = format_line_mode(result.rows, metas)
+        output(body + "\n" + format_timing(len(result.rows), result.elapsed))
+        return
+    body = format_table(result.rows, metas)
+    output(body + "\n" + format_timing(len(result.rows), result.elapsed))
+
+
 # --- prompt_toolkit REPL -------------------------------------------------
 
 
-def _build_prompt_session(history=None, lexer=None):  # pragma: no cover — interactive
+def _build_prompt_session(history=None, lexer=None):  # pragma: no cover - interactive
     from prompt_toolkit import PromptSession
     kwargs = {"multiline": True}
     if history is not None:
@@ -288,12 +303,12 @@ def _build_prompt_session(history=None, lexer=None):  # pragma: no cover — int
     return PromptSession(**kwargs)
 
 
-def _run_prompt_toolkit_repl(db: Database) -> int:  # pragma: no cover — interactive
+def _run_prompt_toolkit_repl(backend: Union[Database, Backend]) -> int:  # pragma: no cover - interactive
     from prompt_toolkit.history import FileHistory as _PTFileHistory
     from tinydb.cli.highlight import make_prompt_toolkit_lexer
     from pathlib import Path
 
-    sys.stdout.write("tinydb v0.1 REPL — enter SQL, or '.help' for commands\n")
+    sys.stdout.write("tinydb v0.1 REPL - enter SQL, or '.help' for commands\n")
     sys.stdout.flush()
 
     history_path = Path.home() / ".tinydb_history"
@@ -301,6 +316,10 @@ def _run_prompt_toolkit_repl(db: Database) -> int:  # pragma: no cover — inter
     lexer = make_prompt_toolkit_lexer()
     session = _build_prompt_session(history=history, lexer=lexer)
     mode = ["table"]
+
+    db = backend._db if isinstance(backend, FileBackend) else (
+        backend if isinstance(backend, Database) else None
+    )
 
     buffer = ""
     while True:
@@ -316,17 +335,17 @@ def _run_prompt_toolkit_repl(db: Database) -> int:  # pragma: no cover — inter
             return 0
         if not text:
             if buffer:
-                # Empty continuation line submits what we have.
                 line = buffer.rstrip()
                 buffer = ""
                 if not line:
                     continue
-                handled = dispatch_meta(line, db, _default_output, mode=mode)
-                if handled == "exit":
-                    return 0
-                if handled == "handled":
-                    continue
-                _execute_sql(line, db, _default_output, mode=mode)
+                if db is not None:
+                    handled = dispatch_meta(line, db, _default_output, mode=mode)
+                    if handled == "exit":
+                        return 0
+                    if handled == "handled":
+                        continue
+                _execute_sql(line, backend, _default_output, mode=mode[0])
             continue
         if buffer:
             buffer = buffer[:-1] if buffer.endswith("\\") else buffer
@@ -338,24 +357,36 @@ def _run_prompt_toolkit_repl(db: Database) -> int:  # pragma: no cover — inter
             buffer = ""
             if not line:
                 continue
-            handled = dispatch_meta(line, db, _default_output, mode=mode)
-            if handled == "exit":
-                return 0
-            if handled == "handled":
-                continue
-            _execute_sql(line, db, _default_output, mode=mode)
+            if db is not None:
+                handled = dispatch_meta(line, db, _default_output, mode=mode)
+                if handled == "exit":
+                    return 0
+                if handled == "handled":
+                    continue
+            _execute_sql(line, backend, _default_output, mode=mode[0])
 
 
 # --- cmd-fallback REPL (v0.1 path) --------------------------------------
 
 
-def _run_cmd_fallback(db: Database) -> int:
+def _run_cmd_fallback(backend: Union[Database, Backend]) -> int:
     """v0.1-compatible REPL using :mod:`cmd` (no PT)."""
-    sys.stdout.write("tinydb v0.2 REPL — enter SQL, or '.help' for commands\n")
+    sys.stdout.write("tinydb v0.2 REPL - enter SQL, or '.help' for commands\n")
     sys.stdout.flush()
 
+    # Pull the wrapped Database out of FileBackend so meta-commands work.
+    db = backend._db if isinstance(backend, FileBackend) else (
+        backend if isinstance(backend, Database) else None
+    )
+
     class _CmdShell:
-        def __init__(self, db: Database, output: OutputFn) -> None:
+        def __init__(
+            self,
+            backend: Union[Database, Backend],
+            output: OutputFn,
+            db: Optional[Database],
+        ) -> None:
+            self.backend = backend
             self.db = db
             self.output = output
             self.mode = "table"
@@ -374,52 +405,48 @@ def _run_cmd_fallback(db: Database) -> int:
                 line = raw.strip()
                 if not line:
                     continue
-                handled = dispatch_meta(line, self.db, self._emit, mode=[self.mode])
-                if handled == "exit":
-                    return 0
-                if handled == "handled":
-                    continue
-                _execute_sql(line, self.db, self._emit, mode=self.mode)
+                if self.db is not None:
+                    handled = dispatch_meta(line, self.db, self._emit, mode=[self.mode])
+                    if handled == "exit":
+                        return 0
+                    if handled == "handled":
+                        continue
+                _execute_sql(line, self.backend, self._emit, mode=self.mode)
 
-    return _CmdShell(db, _default_output).run()
+    return _CmdShell(backend, _default_output, db).run()
 
 
 # --- public entry point -------------------------------------------------
 
 
 def run_repl(
-    db: Database,
+    backend: Union[Database, Backend],
     *,
     input_fn: InputFn = _default_input,
     output: OutputFn = _default_output,
 ) -> int:
     """Drive the REPL.  Returns the process exit code (0 normally).
 
-    The legacy ``input_fn`` / ``output`` injection path runs the
-    v0.1-compatible fallback so the existing 727 tests stay green even
-    when prompt_toolkit is available.  When no ``input_fn`` is passed
-    we use the prompt_toolkit session if installed, otherwise fall back
-    to a ``cmd``-style REPL.
+    Accepts either a :class:`Database` (legacy / file mode) or a
+    :class:`Backend` (remote mode).  Meta-commands are only honoured
+    in the Database branch.
     """
     if input_fn is not _default_input:
         # Legacy test path: never go through prompt_toolkit.
-        return _run_legacy(db, input_fn, output)
+        return _run_legacy(backend, input_fn, output)
 
     if _HAS_PT:
-        return _run_prompt_toolkit_repl(db)
-    return _run_cmd_fallback(db)
+        return _run_prompt_toolkit_repl(backend)
+    return _run_cmd_fallback(backend)
 
 
-def _run_legacy(db: Database, input_fn: InputFn, output: OutputFn) -> int:
-    """Run the v0.1-style REPL loop with an injected ``input_fn``.
-
-    Used by the test suite so we can replay canned input without
-    touching real stdin/stdout.  Handles backslash / unclosed-quote
-    continuation the same way the prompt_toolkit branch does so the
-    same canned input scripts work in both modes.
-    """
-    output("tinydb v0.1 REPL — enter SQL, or '.help' for commands")
-    mode_holder: list = ["table"]  # shared mutable so dispatch_meta can update
+def _run_legacy(backend: Union[Database, Backend], input_fn: InputFn, output: OutputFn) -> int:
+    """Run the v0.1-style REPL loop with an injected ``input_fn``."""
+    output("tinydb v0.1 REPL - enter SQL, or '.help' for commands")
+    mode_holder: list = ["table"]
+    db = backend._db if isinstance(backend, FileBackend) else (
+        backend if isinstance(backend, Database) else None
+    )
     buffer = ""
     while True:
         try:
@@ -437,12 +464,13 @@ def _run_legacy(db: Database, input_fn: InputFn, output: OutputFn) -> int:
         buffer = ""
         if not line:
             continue
-        handled = dispatch_meta(line, db, output, mode=mode_holder)
-        if handled == "exit":
-            return 0
-        if handled == "handled":
-            continue
-        _execute_sql(line, db, output, mode=mode_holder[0])
+        if db is not None:
+            handled = dispatch_meta(line, db, output, mode=mode_holder)
+            if handled == "exit":
+                return 0
+            if handled == "handled":
+                continue
+        _execute_sql(line, backend, output, mode=mode_holder[0])
 
 
 __all__ = [

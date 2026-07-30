@@ -31,6 +31,7 @@ cli = ["prompt_toolkit>=3.0.40"]
 
 [project.scripts]
 tinydb = "tinydb.cli.__main__:main"
+tinydb-server = "tinydb.server.app:main"
 
 [project.urls]
 Homepage = "https://github.com/songmenglin-dev/tinydb"
