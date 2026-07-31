@@ -196,25 +196,36 @@ class Exec:
             )
 
     def to_frame(self) -> Frame:
+        # ``bytearray`` + ``extend`` avoids the quadratic blow-up of
+        # ``bytes += bytes`` in a tight loop (CPython optimises the
+        # first few concats but reverts to O(n) copies as soon as the
+        # RHS is a freshly built bytes object).  Building into a
+        # ``bytearray`` is O(n) end-to-end.
         sql_bytes = self.sql.encode("utf-8")
-        body = struct.pack(">I", len(sql_bytes)) + sql_bytes
-        body += struct.pack(">H", len(self.params))
+        body = bytearray()
+        body.extend(struct.pack(">I", len(sql_bytes)))
+        body.extend(sql_bytes)
+        body.extend(struct.pack(">H", len(self.params)))
         for p in self.params:
-            body += bytes([p.type])
+            body.append(p.type)
             if p.type == ParamType.NULL:
-                body += struct.pack(">I", 0)
+                body.extend(struct.pack(">I", 0))
             elif p.type == ParamType.INT64:
-                body += struct.pack(">I", 8) + struct.pack(">q", int(p.value))
+                body.extend(struct.pack(">I", 8))
+                body.extend(struct.pack(">q", int(p.value)))
             elif p.type == ParamType.FLOAT64:
-                body += struct.pack(">I", 8) + struct.pack(">d", float(p.value))
+                body.extend(struct.pack(">I", 8))
+                body.extend(struct.pack(">d", float(p.value)))
             elif p.type == ParamType.STRING:
                 encoded = str(p.value).encode("utf-8")
-                body += struct.pack(">I", len(encoded)) + encoded
+                body.extend(struct.pack(">I", len(encoded)))
+                body.extend(encoded)
             elif p.type == ParamType.BOOL:
-                body += struct.pack(">I", 1) + bytes([1 if p.value else 0])
+                body.extend(struct.pack(">I", 1))
+                body.append(1 if p.value else 0)
             else:
                 raise ValueError(f"unknown param type: {p.type}")
-        return Frame(type=MessageType.EXEC, payload=body)
+        return Frame(type=MessageType.EXEC, payload=bytes(body))
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "Exec":
@@ -276,11 +287,14 @@ class ResultHeader:
     columns: List[Tuple[str, int]]
 
     def to_frame(self) -> Frame:
-        body = struct.pack(">H", len(self.columns))
+        # ``bytearray`` to avoid quadratic concat cost in the column loop.
+        body = bytearray(struct.pack(">H", len(self.columns)))
         for name, type_code in self.columns:
             encoded = name.encode("utf-8")
-            body += bytes([len(encoded)]) + encoded + bytes([type_code])
-        return Frame(type=MessageType.RESULT_HEADER, payload=body)
+            body.append(len(encoded))
+            body.extend(encoded)
+            body.append(type_code)
+        return Frame(type=MessageType.RESULT_HEADER, payload=bytes(body))
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "ResultHeader":
@@ -309,23 +323,38 @@ class ResultRow:
     values: List[Any]
 
     def to_frame(self) -> Frame:
-        body = struct.pack(">H", len(self.values))
+        # ``bytearray`` avoids the quadratic concat cost of repeated
+        # ``body += bytes(...)`` — ResultRow.to_frame is called once per
+        # row on the SELECT hot path, so this is the most important
+        # encoder to keep O(n).
+        body = bytearray(struct.pack(">H", len(self.values)))
         for v in self.values:
             if v is None:
-                body += bytes([ParamType.NULL]) + struct.pack(">I", 0)
+                body.append(ParamType.NULL)
+                body.extend(struct.pack(">I", 0))
             elif isinstance(v, bool):
-                body += bytes([ParamType.BOOL]) + struct.pack(">I", 1) + bytes([1 if v else 0])
+                body.append(ParamType.BOOL)
+                body.extend(struct.pack(">I", 1))
+                body.append(1 if v else 0)
             elif isinstance(v, int):
-                body += bytes([ParamType.INT64]) + struct.pack(">I", 8) + struct.pack(">q", v)
+                body.append(ParamType.INT64)
+                body.extend(struct.pack(">I", 8))
+                body.extend(struct.pack(">q", v))
             elif isinstance(v, float):
-                body += bytes([ParamType.FLOAT64]) + struct.pack(">I", 8) + struct.pack(">d", v)
+                body.append(ParamType.FLOAT64)
+                body.extend(struct.pack(">I", 8))
+                body.extend(struct.pack(">d", v))
             elif isinstance(v, str):
                 encoded = v.encode("utf-8")
-                body += bytes([ParamType.STRING]) + struct.pack(">I", len(encoded)) + encoded
+                body.append(ParamType.STRING)
+                body.extend(struct.pack(">I", len(encoded)))
+                body.extend(encoded)
             else:
                 encoded = str(v).encode("utf-8")
-                body += bytes([ParamType.STRING]) + struct.pack(">I", len(encoded)) + encoded
-        return Frame(type=MessageType.RESULT_ROW, payload=body)
+                body.append(ParamType.STRING)
+                body.extend(struct.pack(">I", len(encoded)))
+                body.extend(encoded)
+        return Frame(type=MessageType.RESULT_ROW, payload=bytes(body))
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "ResultRow":

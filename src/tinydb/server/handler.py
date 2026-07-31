@@ -5,7 +5,7 @@ list of response frames the server should emit.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from tinydb.errors import (
     ConstraintViolation,
@@ -24,7 +24,6 @@ from tinydb.protocol.messages import (
     ResultError,
     ResultHeader,
     ResultRow,
-    ResultDone as _RD,
 )
 from tinydb.protocol.errors import (
     ConnectionException,
@@ -34,6 +33,14 @@ from tinydb.protocol.errors import (
 )
 from tinydb.sql.ast import CreateTable, DropTable, Select
 from tinydb.sql.parser import parse as parse_sql
+
+
+# Status flags carried in RESULT_DONE.payload[16].  Defined as named
+# constants so callers don't sprinkle raw 0x01 / 0x05 magic numbers
+# throughout the dispatcher.
+STATUS_FLAGS_OK: int = 0x01           # no further work expected
+STATUS_FLAGS_DML: int = 0x05          # at least one row was affected
+STATUS_FLAGS_EMPTY: int = STATUS_FLAGS_OK
 
 
 def _to_param_list(params) -> list:
@@ -110,11 +117,11 @@ def _substitute_params(sql: str, params: list) -> str:
 
 
 def _classify(sql: str) -> str:
-    """Return 'select', 'ddl', or 'dml' based on the SQL AST.
+    """Return 'select', 'ddl', 'dml', or 'txn' based on the first keyword.
 
-    Falls back to "select" when the SQL doesn't parse (so a malformed
-    query produces a single RESULT_DONE error rather than getting
-    mis-classified as DML).
+    Falls back to "dml" when the SQL doesn't start with a recognised
+    verb so the executor can produce a useful error message via its
+    own parser.
     """
     upper = sql.strip().split(None, 1)[0:1]
     if not upper:
@@ -128,9 +135,71 @@ def _classify(sql: str) -> str:
         return "dml"
     if head in ("BEGIN", "COMMIT", "ROLLBACK"):
         return "txn"
-    # Unknown - default to "dml" so the executor can produce a useful
-    # error message via its own parser.
     return "dml"
+
+
+def _map_error(exc: Exception) -> ResultError:
+    """Translate a Database exception to the corresponding wire error frame."""
+    if isinstance(exc, ParseError):
+        return ResultError(code="42000", msg=f"syntax error: {exc.msg}")
+    if isinstance(exc, (ConstraintViolation, NotNullViolation)):
+        return ResultError(code="22000", msg=str(exc))
+    if isinstance(exc, TypeMismatchError):
+        return ResultError(code="22000", msg=str(exc))
+    if isinstance(exc, TinydbError):
+        return ResultError(code="HY000", msg=str(exc))
+    return ResultError(code="HY000", msg=str(exc))
+
+
+def _rows_to_frames(rows: list, kind: str, *, guess_columns: bool) -> List[Frame]:
+    """Build the wire response frames for a Database.execute() result.
+
+    ``kind`` selects the framing:
+      * ``ddl``  → just a single RESULT_DONE.
+      * ``dml``  → RESULT_DONE with the affected-row count.
+      * ``select`` → RESULT_HEADER + RESULT_ROW* + RESULT_DONE.
+
+    ``guess_columns`` chooses how to label columns:
+      * ``True``  → derive ``(name, type_code)`` from the first row
+        (used by QUERY, where the executor hasn't pre-classified
+        values).
+      * ``False`` → label columns ``col{i}`` with a string type code
+        (used by EXEC, where the server only emits the row stream
+        without re-typing each value).
+    """
+    if kind == "ddl":
+        return [ResultDone(rowcount=0, last_insert_id=0, status_flags=STATUS_FLAGS_OK).to_frame()]
+    if kind == "dml":
+        affected = int(rows[0][0]) if rows else 0
+        return [
+            ResultDone(
+                rowcount=affected,
+                last_insert_id=0,
+                status_flags=STATUS_FLAGS_DML,
+            ).to_frame()
+        ]
+    # SELECT (or anything else we treat as a row stream).
+    if not rows:
+        return [
+            ResultHeader(columns=[]).to_frame(),
+            ResultRow(values=[]).to_frame(),
+            ResultDone(rowcount=0, last_insert_id=0, status_flags=STATUS_FLAGS_OK).to_frame(),
+        ]
+    if guess_columns:
+        columns = [
+            (f"col{i}", _guess_type_code(v)) for i, v in enumerate(rows[0])
+        ]
+    else:
+        columns = [(f"col{i}", ParamType.STRING.value) for i in range(len(rows[0]))]
+    out: List[Frame] = [ResultHeader(columns=columns).to_frame()]
+    for row in rows:
+        out.append(ResultRow(values=list(row)).to_frame())
+    out.append(
+        ResultDone(
+            rowcount=len(rows), last_insert_id=0, status_flags=STATUS_FLAGS_OK
+        ).to_frame()
+    )
+    return out
 
 
 async def dispatch_message(msg, db) -> List[Frame]:
@@ -145,106 +214,39 @@ async def dispatch_message(msg, db) -> List[Frame]:
     raise GeneralException(f"unhandled message type: {type(msg).__name__}")
 
 
-def dispatch_query(msg: Query, db) -> List[Frame]:
-    if not msg.sql or not msg.sql.strip():
+def _dispatch_sql(sql: str, db, *, guess_columns: bool) -> List[Frame]:
+    """Shared implementation for QUERY and EXEC.
+
+    Both call paths funnel through here so error mapping and result
+    framing stay consistent.  ``guess_columns`` is the only knob that
+    varies between them (QUERY has untyped Python rows; EXEC has
+    already been bound to typed parameters).
+    """
+    if not sql or not sql.strip():
         return [ResultError(code="42000", msg="empty SQL").to_frame()]
-    kind = _classify(msg.sql)
+    kind = _classify(sql)
     try:
-        rows = db.execute(msg.sql)
-    except ParseError as e:
-        return [ResultError(code="42000", msg=f"syntax error: {e.msg}").to_frame()]
-    except (ConstraintViolation, NotNullViolation) as e:
-        return [ResultError(code="22000", msg=str(e)).to_frame()]
-    except TypeMismatchError as e:
-        return [ResultError(code="22000", msg=str(e)).to_frame()]
-    except TinydbError as e:
-        return [ResultError(code="HY000", msg=str(e)).to_frame()]
-    # Normalise rows to list[list] for the wire protocol.
-    if kind == "ddl":
-        # DDL returns RESULT_DONE only.
-        return [
-            ResultDone(rowcount=0, last_insert_id=0, status_flags=0x01).to_frame()
-        ]
-    if kind == "dml":
-        # DML returns [(affected_count,)].
-        if rows:
-            affected = int(rows[0][0])
-        else:
-            affected = 0
-        return [
-            ResultDone(
-                rowcount=affected,
-                last_insert_id=0,
-                status_flags=0x05,
-            ).to_frame()
-        ]
-    # SELECT: send header + rows + done.
-    if not rows:
-        return [
-            ResultHeader(columns=[]).to_frame(),
-            ResultRow(values=[]).to_frame(),
-            ResultDone(rowcount=0, last_insert_id=0, status_flags=0x01).to_frame(),
-        ]
-    columns = [
-        (f"col{i}", _guess_type_code(v)) for i, v in enumerate(rows[0])
-    ]
-    out = [ResultHeader(columns=columns).to_frame()]
-    for row in rows:
-        out.append(ResultRow(values=list(row)).to_frame())
-    out.append(
-        ResultDone(
-            rowcount=len(rows), last_insert_id=0, status_flags=0x01
-        ).to_frame()
-    )
-    return out
+        rows = db.execute(sql)
+    except Exception as e:
+        return [_map_error(e).to_frame()]
+    return _rows_to_frames(rows, kind, guess_columns=guess_columns)
+
+
+def dispatch_query(msg: Query, db) -> List[Frame]:
+    """Handle a QUERY frame: SQL with no parameters."""
+    return _dispatch_sql(msg.sql, db, guess_columns=True)
 
 
 def dispatch_exec(msg: Exec, db) -> List[Frame]:
-    """EXEC frame: SQL + typed parameters."""
+    """Handle an EXEC frame: SQL + typed parameters.
+
+    Parameters are rendered back into the SQL string via
+    :func:`_substitute_params` so the existing Database.execute(sql)
+    path can be reused unchanged.
+    """
     params = _to_param_list(msg.params)
-    # Substitute ? placeholders with literal values so the existing
-    # Database.execute(sql) path can be reused unchanged.
     substituted = _substitute_params(msg.sql, params)
-    kind = _classify(substituted)
-    try:
-        rows = db.execute(substituted)
-    except ParseError as pe:
-        return [ResultError(code="42000", msg=f"syntax error: {pe.msg}").to_frame()]
-    except (ConstraintViolation, NotNullViolation) as cv:
-        return [ResultError(code="22000", msg=str(cv)).to_frame()]
-    except TypeMismatchError as te:
-        return [ResultError(code="22000", msg=str(te)).to_frame()]
-    except TinydbError as te:
-        return [ResultError(code="HY000", msg=str(te)).to_frame()]
-    if kind == "ddl":
-        return [
-            ResultDone(rowcount=0, last_insert_id=0, status_flags=0x01).to_frame()
-        ]
-    if kind == "dml":
-        affected = int(rows[0][0]) if rows else 0
-        return [
-            ResultDone(
-                rowcount=affected,
-                last_insert_id=0,
-                status_flags=0x05,
-            ).to_frame()
-        ]
-    if not rows:
-        return [
-            ResultHeader(columns=[]).to_frame(),
-            ResultRow(values=[]).to_frame(),
-            ResultDone(rowcount=0, last_insert_id=0, status_flags=0x01).to_frame(),
-        ]
-    columns = [(f"col{i}", 0x03) for i in range(len(rows[0]))]
-    out = [ResultHeader(columns=columns).to_frame()]
-    for row in rows:
-        out.append(ResultRow(values=list(row)).to_frame())
-    out.append(
-        ResultDone(
-            rowcount=len(rows), last_insert_id=0, status_flags=0x01
-        ).to_frame()
-    )
-    return out
+    return _dispatch_sql(substituted, db, guess_columns=False)
 
 
 def _guess_type_code(value) -> int:
@@ -257,8 +259,9 @@ def _guess_type_code(value) -> int:
         return ParamType.INT64.value
     if isinstance(value, float):
         return ParamType.FLOAT64.value
-    if isinstance(value, str):
-        return ParamType.STRING.value
+    # str + everything else fall through to STRING.  This is the same
+    # default the codec uses for unknown wire types, so a round-trip
+    # stays lossless.
     return ParamType.STRING.value
 
 
