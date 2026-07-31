@@ -306,12 +306,25 @@ public class TinyConnection implements Connection {
     @Override
     public void commit() throws SQLException {
         checkOpen();
+        // JDBC spec: ``commit()`` is illegal while ``autoCommit == true``.
+        // Silently swallowing the call (or worse, sending a COMMIT to
+        // a server that hasn't seen BEGIN) would mask logic bugs in
+        // the caller.  Use SQLSTATE 25000 (invalid transaction state)
+        // to match the PostgreSQL/MySQL convention.
+        if (autoCommit) {
+            throw new SQLException(
+                    "Cannot call commit() when autoCommit is true", "25000");
+        }
         sendQuery("COMMIT");
     }
 
     @Override
     public void rollback() throws SQLException {
         checkOpen();
+        if (autoCommit) {
+            throw new SQLException(
+                    "Cannot call rollback() when autoCommit is true", "25000");
+        }
         sendQuery("ROLLBACK");
     }
 
@@ -324,14 +337,21 @@ public class TinyConnection implements Connection {
     @Override
     public void close() throws SQLException {
         if (closed) return;
-        closed = true;
-        try {
-            Frame quit = Codec.encodeQuit();
-            quit.write(out);
-        } catch (IOException ignored) { }
-        try {
-            socket.close();
-        } catch (IOException ignored) { }
+        // ``sendLock`` serialises sendQuery/sendExec with close().
+        // Without it a concurrent query could observe ``closed = true``
+        // and bail mid-frame while the writer is still flushing the
+        // QUIT, leaving the server with a half-drained connection.
+        synchronized (sendLock) {
+            if (closed) return;
+            closed = true;
+            try {
+                Frame quit = Codec.encodeQuit();
+                quit.write(out);
+            } catch (IOException ignored) { }
+            try {
+                socket.close();
+            } catch (IOException ignored) { }
+        }
     }
 
     @Override

@@ -14,7 +14,12 @@ import java.sql.SQLTransactionRollbackException;
 public final class ErrorCode {
     public static final String CONNECTION_EXCEPTION = "08000";
     public static final String DATA_EXCEPTION = "22000";
+    /** Class 23 - Integrity Constraint Violation. */
+    public static final String INTEGRITY_CONSTRAINT_VIOLATION = "23000";
+    /** Class 25 - Invalid Transaction State (no dedicated JDBC 4.2 subclass). */
     public static final String TRANSACTION_STATE_INVALID = "25000";
+    /** Class 40 - Transaction Rollback. */
+    public static final String TRANSACTION_ROLLBACK = "40000";
     public static final String SYNTAX_ERROR = "42000";
     public static final String GENERAL_ERROR = "HY000";
 
@@ -36,10 +41,18 @@ public final class ErrorCode {
             // at this level - return SQLDataException as the broader type.
             return new SQLDataException(msg, code);
         }
+        if (INTEGRITY_CONSTRAINT_VIOLATION.equals(code)) {
+            return new SQLIntegrityConstraintViolationException(msg, code);
+        }
         if (TRANSACTION_STATE_INVALID.equals(code)) {
-            // SQLInvalidTransactionStateException was added in Java 9 / JDBC 4.3.
-            // Java 8 / JDBC 4.2 doesn't have it, so use SQLTransactionRollbackException
-            // (or fall back to plain SQLException).
+            // ``SQLInvalidTransactionStateException`` was added in Java 9 / JDBC 4.3.
+            // tinydb targets Java 8 / JDBC 4.2 where the subclass doesn't exist;
+            // fall back to plain ``SQLException`` rather than misclassify as a
+            // 40-class ``SQLTransactionRollbackException``.
+            return new SQLException(msg, code);
+        }
+        if (TRANSACTION_ROLLBACK.equals(code)
+                || code.startsWith("40")) {
             return new SQLTransactionRollbackException(msg, code);
         }
         if (SYNTAX_ERROR.equals(code)) {
@@ -53,13 +66,13 @@ public final class ErrorCode {
      * Helper for constraint violations (more specific than DATA_EXCEPTION).
      */
     public static SQLException constraintViolation(String msg) {
-        return new SQLIntegrityConstraintViolationException(msg, DATA_EXCEPTION);
+        return new SQLIntegrityConstraintViolationException(msg, INTEGRITY_CONSTRAINT_VIOLATION);
     }
 
     /**
      * Helper for transaction rollback.
      */
     public static SQLException transactionRollback(String msg) {
-        return new SQLTransactionRollbackException(msg, TRANSACTION_STATE_INVALID);
+        return new SQLTransactionRollbackException(msg, TRANSACTION_ROLLBACK);
     }
 }

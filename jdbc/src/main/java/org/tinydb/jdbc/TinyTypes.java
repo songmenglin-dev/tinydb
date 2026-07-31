@@ -13,46 +13,15 @@ import java.sql.Types;
  *  0x02 FLOAT64
  *  0x03 STRING
  *  0x04 BOOL
+ *
+ * Only the wire -> JDBC direction is used at the moment (by
+ * :class:`TinyResultSet`'s metadata).  The reverse mapping was
+ * originally planned for ``setObject(int, Object, int)`` but v0.3
+ * falls back on string conversion for unknown types — see
+ * ``TinyPreparedStatement.setObject`` for the heuristic.
  */
 public final class TinyTypes {
     private TinyTypes() {}
-
-    /**
-     * Convert JDBC java.sql.Types code to wire protocol type byte.
-     * Returns WIRE_NULL for unknown types.
-     */
-    public static byte jdbcToWireCode(int sqlType) {
-        switch (sqlType) {
-            case Types.NULL:
-                return Codec.WIRE_NULL;
-            case Types.BIGINT:
-            case Types.INTEGER:
-            case Types.SMALLINT:
-            case Types.TINYINT:
-                return Codec.WIRE_INT64;
-            case Types.DOUBLE:
-            case Types.FLOAT:
-            case Types.REAL:
-            case Types.NUMERIC:
-            case Types.DECIMAL:
-                return Codec.WIRE_FLOAT64;
-            case Types.VARCHAR:
-            case Types.CHAR:
-            case Types.LONGVARCHAR:
-            case Types.NCHAR:
-            case Types.NVARCHAR:
-            case Types.LONGNVARCHAR:
-            case Types.CLOB:
-            case Types.NCLOB:
-                return Codec.WIRE_STRING;
-            case Types.BOOLEAN:
-            case Types.BIT:
-                return Codec.WIRE_BOOL;
-            default:
-                // unknown -> treat as string (most permissive)
-                return Codec.WIRE_STRING;
-        }
-    }
 
     /**
      * Convert wire protocol type byte to JDBC java.sql.Types code.

@@ -212,6 +212,7 @@ public class TinyPreparedStatement extends TinyStatement implements PreparedStat
         if (!r.hasHeader) throw new SQLException("query did not return a result set", "HY000");
         currentResultSet = new TinyResultSet(r.columns, r.rows);
         updateCount = -1;
+        updateCountOverflow = false;
         return currentResultSet;
     }
 
@@ -220,8 +221,8 @@ public class TinyPreparedStatement extends TinyStatement implements PreparedStat
         checkOpen();
         TinyConnection.QueryResult r = connection.sendExec(sql, new ArrayList<>(parameters));
         currentResultSet = null;
-        updateCount = (int) r.rowcount;
-        return updateCount;
+        recordUpdateCount(r.rowcount);
+        return (int) updateCount;
     }
 
     @Override
@@ -231,10 +232,11 @@ public class TinyPreparedStatement extends TinyStatement implements PreparedStat
         if (r.hasHeader) {
             currentResultSet = new TinyResultSet(r.columns, r.rows);
             updateCount = -1;
+            updateCountOverflow = false;
             return true;
         }
         currentResultSet = null;
-        updateCount = (int) r.rowcount;
+        recordUpdateCount(r.rowcount);
         return false;
     }
 

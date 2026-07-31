@@ -450,13 +450,16 @@ public class TinyResultSet implements ResultSet {
     private boolean lastWasNull = false;
 
     public TinyResultSet(List<Codec.Column> columns, List<List<Object>> rows) {
-        this.columns = columns;
-        this.rows = rows;
+        // Defensive copy: ``columns`` and ``rows`` are both optional in the
+        // wire protocol (e.g. an EXEC that returns no result set) and may be
+        // null when handed to us.  Normalising here lets every downstream
+        // accessor (``getMetaData``, ``findColumn``, etc.) skip its own
+        // null check.
+        this.columns = columns != null ? columns : java.util.Collections.emptyList();
+        this.rows = rows != null ? rows : java.util.Collections.emptyList();
         this.columnIndexByName = new HashMap<>();
-        if (columns != null) {
-            for (int i = 0; i < columns.size(); i++) {
-                columnIndexByName.put(columns.get(i).name.toLowerCase(), i + 1);
-            }
+        for (int i = 0; i < this.columns.size(); i++) {
+            columnIndexByName.put(this.columns.get(i).name.toLowerCase(), i + 1);
         }
     }
 
@@ -489,6 +492,9 @@ public class TinyResultSet implements ResultSet {
     @Override
     public int findColumn(String columnLabel) throws SQLException {
         checkOpen();
+        if (columnLabel == null) {
+            throw new SQLException("columnLabel is null", "HY000");
+        }
         Integer idx = columnIndexByName.get(columnLabel.toLowerCase());
         if (idx == null) throw new SQLException("column not found: " + columnLabel, "HY000");
         return idx;
@@ -531,20 +537,40 @@ public class TinyResultSet implements ResultSet {
     public int getInt(int columnIndex) throws SQLException {
         Object v = getValue(columnIndex);
         if (v == null) return 0;
-        if (v instanceof Long) return ((Long) v).intValue();
+        if (v instanceof Long) {
+            long lv = (Long) v;
+            if (lv < Integer.MIN_VALUE || lv > Integer.MAX_VALUE) {
+                throw new SQLException("value " + lv + " does not fit in int", "22000");
+            }
+            return (int) lv;
+        }
         if (v instanceof Integer) return (Integer) v;
         if (v instanceof Number) return ((Number) v).intValue();
-        return Integer.parseInt(v.toString());
+        try {
+            return Integer.parseInt(v.toString());
+        } catch (NumberFormatException nfe) {
+            throw new SQLException("value not an int: " + v, "22000", nfe);
+        }
     }
 
     @Override
     public int getInt(String columnLabel) throws SQLException {
         Object v = getValueByName(columnLabel);
         if (v == null) return 0;
-        if (v instanceof Long) return ((Long) v).intValue();
+        if (v instanceof Long) {
+            long lv = (Long) v;
+            if (lv < Integer.MIN_VALUE || lv > Integer.MAX_VALUE) {
+                throw new SQLException("value " + lv + " does not fit in int", "22000");
+            }
+            return (int) lv;
+        }
         if (v instanceof Integer) return (Integer) v;
         if (v instanceof Number) return ((Number) v).intValue();
-        return Integer.parseInt(v.toString());
+        try {
+            return Integer.parseInt(v.toString());
+        } catch (NumberFormatException nfe) {
+            throw new SQLException("value not an int: " + v, "22000", nfe);
+        }
     }
 
     @Override
@@ -630,6 +656,10 @@ public class TinyResultSet implements ResultSet {
     @Override
     public ResultSetMetaData getMetaData() throws SQLException {
         checkOpen();
+        // If the server returned no columns (e.g. an EXEC that produced
+        // no result set), surface an empty metadata object rather than
+        // letting ``columns.get(...)`` blow up downstream.
+        final List<Codec.Column> safeColumns = columns;
         return new ResultSetMetaData() {
             @Override public int getColumnCount() { return columns.size(); }
             @Override public String getColumnName(int column) { return columns.get(column - 1).name; }
@@ -692,13 +722,40 @@ public class TinyResultSet implements ResultSet {
     @Override
     public int getRow() { return currentRow + 1; }
     @Override
-    public byte getByte(int columnIndex) throws SQLException { return (byte) getInt(columnIndex); }
+    public byte getByte(int columnIndex) throws SQLException {
+        int v = getInt(columnIndex);
+        // ``getInt`` already throws on overflow vs Integer; here we additionally
+        // surface ``SQLFeatureNotSupportedException``-style narrowing errors
+        // when the int itself doesn't fit in a byte.
+        if (v < Byte.MIN_VALUE || v > Byte.MAX_VALUE) {
+            throw new SQLException("value " + v + " does not fit in byte", "22000");
+        }
+        return (byte) v;
+    }
     @Override
-    public byte getByte(String columnLabel) throws SQLException { return (byte) getInt(columnLabel); }
+    public byte getByte(String columnLabel) throws SQLException {
+        int v = getInt(columnLabel);
+        if (v < Byte.MIN_VALUE || v > Byte.MAX_VALUE) {
+            throw new SQLException("value " + v + " does not fit in byte", "22000");
+        }
+        return (byte) v;
+    }
     @Override
-    public short getShort(int columnIndex) throws SQLException { return (short) getInt(columnIndex); }
+    public short getShort(int columnIndex) throws SQLException {
+        int v = getInt(columnIndex);
+        if (v < Short.MIN_VALUE || v > Short.MAX_VALUE) {
+            throw new SQLException("value " + v + " does not fit in short", "22000");
+        }
+        return (short) v;
+    }
     @Override
-    public short getShort(String columnLabel) throws SQLException { return (short) getInt(columnLabel); }
+    public short getShort(String columnLabel) throws SQLException {
+        int v = getInt(columnLabel);
+        if (v < Short.MIN_VALUE || v > Short.MAX_VALUE) {
+            throw new SQLException("value " + v + " does not fit in short", "22000");
+        }
+        return (short) v;
+    }
     @Override
     public float getFloat(int columnIndex) throws SQLException { return (float) getDouble(columnIndex); }
     @Override
@@ -734,12 +791,12 @@ public class TinyResultSet implements ResultSet {
     @Override
     public Date getDate(int columnIndex) throws SQLException {
         String s = getString(columnIndex);
-        return s == null ? null : Date.valueOf(s);
+        return s == null ? null : parseDate(s);
     }
     @Override
     public Date getDate(String columnLabel) throws SQLException {
         String s = getString(columnLabel);
-        return s == null ? null : Date.valueOf(s);
+        return s == null ? null : parseDate(s);
     }
     @Override
     public Date getDate(int columnIndex, java.util.Calendar cal) throws SQLException {
@@ -752,12 +809,12 @@ public class TinyResultSet implements ResultSet {
     @Override
     public Time getTime(int columnIndex) throws SQLException {
         String s = getString(columnIndex);
-        return s == null ? null : Time.valueOf(s);
+        return s == null ? null : parseTime(s);
     }
     @Override
     public Time getTime(String columnLabel) throws SQLException {
         String s = getString(columnLabel);
-        return s == null ? null : Time.valueOf(s);
+        return s == null ? null : parseTime(s);
     }
     @Override
     public Time getTime(int columnIndex, java.util.Calendar cal) throws SQLException {
@@ -770,12 +827,12 @@ public class TinyResultSet implements ResultSet {
     @Override
     public Timestamp getTimestamp(int columnIndex) throws SQLException {
         String s = getString(columnIndex);
-        return s == null ? null : Timestamp.valueOf(s);
+        return s == null ? null : parseTimestamp(s);
     }
     @Override
     public Timestamp getTimestamp(String columnLabel) throws SQLException {
         String s = getString(columnLabel);
-        return s == null ? null : Timestamp.valueOf(s);
+        return s == null ? null : parseTimestamp(s);
     }
     @Override
     public Timestamp getTimestamp(int columnIndex, java.util.Calendar cal) throws SQLException {
@@ -784,5 +841,34 @@ public class TinyResultSet implements ResultSet {
     @Override
     public Timestamp getTimestamp(String columnLabel, java.util.Calendar cal) throws SQLException {
         return getTimestamp(columnLabel);
+    }
+
+    /**
+     * ``Date.valueOf`` throws ``IllegalArgumentException`` for malformed
+     * input; wrap it as a ``SQLDataException`` (SQLSTATE 22000) so JDBC
+     * callers can handle it uniformly.
+     */
+    private static Date parseDate(String s) throws SQLException {
+        try {
+            return Date.valueOf(s);
+        } catch (IllegalArgumentException iae) {
+            throw new SQLException("invalid date value: " + s, "22000", iae);
+        }
+    }
+
+    private static Time parseTime(String s) throws SQLException {
+        try {
+            return Time.valueOf(s);
+        } catch (IllegalArgumentException iae) {
+            throw new SQLException("invalid time value: " + s, "22000", iae);
+        }
+    }
+
+    private static Timestamp parseTimestamp(String s) throws SQLException {
+        try {
+            return Timestamp.valueOf(s);
+        } catch (IllegalArgumentException iae) {
+            throw new SQLException("invalid timestamp value: " + s, "22000", iae);
+        }
     }
 }

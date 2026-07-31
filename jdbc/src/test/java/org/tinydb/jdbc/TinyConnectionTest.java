@@ -170,7 +170,7 @@ class TinyConnectionTest {
     }
 
     @Test
-    @DisplayName("commit and rollback send SQL commands")
+    @DisplayName("commit and rollback send SQL commands (autoCommit must be off)")
     void testCommitRollback() throws Exception {
         ServerSocket ss = startFakeServer();
         AtomicReference<String> lastSql = new AtomicReference<>();
@@ -179,6 +179,8 @@ class TinyConnectionTest {
             try (Connection conn = DriverManager.getConnection(
                     "jdbc:tinydb://127.0.0.1:" + port + "/testdb")) {
                 // The fake server echoes back RESULT_HEADER/DONE
+                // commit/rollback are only valid when autoCommit is false.
+                conn.setAutoCommit(false);
                 conn.commit();
                 conn.rollback();
             }

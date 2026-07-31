@@ -37,11 +37,13 @@ class ErrorCodeTest {
     }
 
     @Test
-    @DisplayName("25000 maps to SQLInvalidTransactionStateException")
+    @DisplayName("25000 maps to plain SQLException (no JDBC 4.2 subclass available)")
     void testTransactionState() {
         SQLException e = ErrorCode.toSqlException("25000", "no active transaction");
         assertNotNull(e);
-        assertTrue(e instanceof java.sql.SQLTransactionRollbackException);
+        // SQLInvalidTransactionStateException was added in Java 9 / JDBC 4.3;
+        // tinydb targets Java 8 / JDBC 4.2 so we fall back to plain SQLException.
+        assertEquals(SQLException.class, e.getClass());
         assertEquals("25000", e.getSQLState());
     }
 
@@ -52,6 +54,15 @@ class ErrorCodeTest {
         assertNotNull(e);
         assertTrue(e instanceof SQLSyntaxErrorException);
         assertEquals("42000", e.getSQLState());
+    }
+
+    @Test
+    @DisplayName("40000 maps to SQLTransactionRollbackException")
+    void testTransactionRollbackClass() {
+        SQLException e = ErrorCode.toSqlException("40000", "deadlock detected");
+        assertNotNull(e);
+        assertTrue(e instanceof java.sql.SQLTransactionRollbackException);
+        assertEquals("40000", e.getSQLState());
     }
 
     @Test
@@ -85,7 +96,9 @@ class ErrorCodeTest {
     void testConstraintViolation() {
         SQLException e = ErrorCode.constraintViolation("UNIQUE constraint violated");
         assertTrue(e instanceof SQLIntegrityConstraintViolationException);
-        assertEquals("22000", e.getSQLState());
+        // Integrity constraint violations are class 23 per the SQL standard,
+        // not class 22 (data exception).
+        assertEquals("23000", e.getSQLState());
     }
 
     @Test
@@ -93,7 +106,8 @@ class ErrorCodeTest {
     void testTransactionRollback() {
         SQLException e = ErrorCode.transactionRollback("deadlock");
         assertTrue(e instanceof java.sql.SQLTransactionRollbackException);
-        assertEquals("25000", e.getSQLState());
+        // Transaction rollback is class 40 per the SQL standard.
+        assertEquals("40000", e.getSQLState());
     }
 
     @Test

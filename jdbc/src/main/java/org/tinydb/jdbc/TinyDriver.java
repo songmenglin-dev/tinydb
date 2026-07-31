@@ -42,34 +42,48 @@ public class TinyDriver implements Driver {
         if (url == null) return null;
         if (!acceptsURL(url)) return null;
         ParsedUrl p = parseUrl(url);
+        Socket sock = null;
         try {
-            Socket sock = new Socket();
+            sock = new Socket();
             sock.connect(new InetSocketAddress(p.host, p.port), 5000);
             sock.setSoTimeout(30000);
             DataOutputStream out = new DataOutputStream(sock.getOutputStream());
             DataInputStream in = new DataInputStream(sock.getInputStream());
-            // Send HELLO
-            Frame hello = Codec.encodeHello("tinydb-jdbc-0.3.0");
+            // Send HELLO.  ``Codec.encodeHello`` only fails on a
+            // programming error (e.g. client id > MAX_CLIENT_ID), but
+            // catching RuntimeException here keeps the socket from
+            // leaking if the encoder ever throws.
+            Frame hello;
+            try {
+                hello = Codec.encodeHello("tinydb-jdbc-0.3.0");
+            } catch (RuntimeException re) {
+                throw new SQLException("handshake encode failed: " + re.getMessage(), "08000", re);
+            }
             hello.write(out);
             // Wait for OK
             Frame resp = Frame.read(in);
             if (resp == null) {
-                sock.close();
                 throw new SQLException("connection closed during handshake", "08000");
             }
             if (resp.getType() == Codec.TYPE_ERR) {
                 String[] parts = Codec.decodeResultError(resp);
-                sock.close();
                 throw TinySQLException.fromServer(parts[0], parts[1]);
             }
             if (resp.getType() != Codec.TYPE_OK) {
-                sock.close();
                 throw new SQLException("expected OK got 0x" + String.format("%02X", resp.getType() & 0xFF), "08000");
             }
             String version = Codec.decodeOk(resp);
-            return new TinyConnection(sock, in, out, p.host, p.port, p.database, version);
+            TinyConnection conn = new TinyConnection(sock, in, out, p.host, p.port, p.database, version);
+            // Hand ownership of the socket to the connection; from now
+            // on ``conn.close()`` is responsible for releasing it.
+            sock = null;
+            return conn;
         } catch (IOException e) {
             throw new SQLException("Failed to connect: " + e.getMessage(), "08000", e);
+        } finally {
+            if (sock != null) {
+                try { sock.close(); } catch (IOException ignored) { }
+            }
         }
     }
 
