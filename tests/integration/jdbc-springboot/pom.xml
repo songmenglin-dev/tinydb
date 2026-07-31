@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.example</groupId>
+    <artifactId>tinydb-jdbc-springboot-test</artifactId>
+    <version>0.3.0</version>
+    <packaging>jar</packaging>
+
+    <name>tinydb-jdbc-springboot-test</name>
+    <description>
+        Spring Boot + MyBatis integration test that drives the local
+        tinydb-jdbc-0.3.0.jar driver against a running tinydb-server
+        to verify end-to-end JDBC connectivity.
+    </description>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>2.7.18</version>
+        <relativePath/>
+    </parent>
+
+    <properties>
+        <java.version>1.8</java.version>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <mybatis.starter.version>2.3.1</mybatis.starter.version>
+    </properties>
+
+    <dependencies>
+        <!-- Spring Boot starter (web is optional, kept for completeness) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- MyBatis Spring Boot Starter -->
+        <dependency>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter</artifactId>
+            <version>${mybatis.starter.version}</version>
+        </dependency>
+
+        <!-- The locally-built tinydb-jdbc driver.  Resolved via systemPath
+             so the test always picks up the current tinydb-jdbc-0.3.0.jar
+             without needing to publish it to a Maven repo. -->
+        <dependency>
+            <groupId>org.tinydb</groupId>
+            <artifactId>tinydb-jdbc</artifactId>
+            <version>0.3.0</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/../../../jdbc/target/tinydb-jdbc-0.3.0.jar</systemPath>
+        </dependency>
+
+        <!-- Test scope -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

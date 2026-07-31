@@ -1,0 +1,18 @@
+spring:
+  application:
+    name: tinydb-jdbc-springboot-test
+  datasource:
+    # tinydb-jdbc-0.3.0.jar registers itself via META-INF/services, but
+    # Spring Boot's auto-detection also wants an explicit driver class
+    # name — give it so Hikari doesn't fail with "Failed to determine a
+    # suitable driver class".
+    url: ${TINYDB_JDBC_URL:jdbc:tinydb://127.0.0.1:18520/}
+    driver-class-name: org.tinydb.jdbc.TinyDriver
+    username: ""
+    password: ""
+
+# MyBatis: mapper interfaces live under com.example.tinydb.mapper.*
+# and are auto-detected via @Mapper.  No XML mapper files are needed.
+mybatis:
+  configuration:
+    map-underscore-to-camel-case: true

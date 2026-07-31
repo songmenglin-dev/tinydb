@@ -60,3 +60,10 @@ coverage.xml
 
 # Maven build artifacts (JDBC subproject)
 jdbc/target/
+
+# jdbc-springboot integration project artifacts
+tests/integration/jdbc-springboot/target/
+tests/integration/jdbc-springboot/.tinydb-sb.db
+tests/integration/jdbc-springboot/.tinydb-sb.db.wal
+tests/integration/jdbc-springboot/scripts/.tinydb-server.pid
+tests/integration/jdbc-springboot/scripts/.tinydb-server.log
