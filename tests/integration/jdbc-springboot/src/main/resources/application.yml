@@ -6,7 +6,7 @@ spring:
     # Spring Boot's auto-detection also wants an explicit driver class
     # name — give it so Hikari doesn't fail with "Failed to determine a
     # suitable driver class".
-    url: ${TINYDB_JDBC_URL:jdbc:tinydb://127.0.0.1:18520/}
+    url: ${TINYDB_JDBC_URL:jdbc:tinydb://172.29.163.109:8765/}
     driver-class-name: org.tinydb.jdbc.TinyDriver
     username: ""
     password: ""
@@ -16,3 +16,10 @@ spring:
 mybatis:
   configuration:
     map-underscore-to-camel-case: true
+    auto-mapping-behavior: full
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+server:
+  port: 9950
+
+debug: true

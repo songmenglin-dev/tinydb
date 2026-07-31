@@ -1,9 +1,11 @@
 package com.example.tinydb.entity;
 
 /**
- * Plain POJO mapped from the {@code users} table.  Field names match
- * the column names used by {@code UserMapper} so MyBatis can populate
- * them via reflection without an explicit {@code @Results} mapping.
+ * Plain POJO mapped from the {@code users} table — three columns
+ * matching the SQL surface the v0.3 parser has shipped stable
+ * support for.  Field names match the column names used by
+ * {@code UserMapper} so MyBatis can populate them via reflection
+ * without an explicit {@code @Results} mapping.
  */
 public class User {
     private Integer id;
