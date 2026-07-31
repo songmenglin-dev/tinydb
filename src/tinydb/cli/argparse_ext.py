@@ -79,12 +79,21 @@ def _open_backend(ns: argparse.Namespace) -> Backend:
     from tinydb.cli.uri import parse_uri
     from tinydb.client.errors import ConnectionError as ClientConnectionError
     from tinydb.client.sync import Client
-    uri = parse_uri(ns.uri)
+    # Both parse_uri and Client() can fail; wrap both inside the
+    # try so a malformed URI (e.g. ``tinydb://:9999``) is reported as
+    # a connection error and the CLI exits cleanly instead of
+    # propagating a ValueError traceback.
+    uri = None
     try:
+        uri = parse_uri(ns.uri)
         return RemoteBackend(Client(uri.host, uri.port, database=uri.database))
     except ClientConnectionError as exc:
-        print(f"Error: cannot connect to {uri.host}:{uri.port}: {exc}",
+        target = f"{uri.host}:{uri.port}" if uri is not None else ns.uri or ""
+        print(f"Error: cannot connect to {target}: {exc}",
               file=sys.stderr)
+        sys.exit(1)
+    except ValueError as exc:
+        print(f"Error: invalid URI {ns.uri!r}: {exc}", file=sys.stderr)
         sys.exit(1)
 
 

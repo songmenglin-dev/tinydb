@@ -46,12 +46,52 @@ class Backend(ABC):
     def close(self) -> None:
         """Release backend resources."""
 
+    @property
+    @abstractmethod
+    def kind(self) -> str:
+        """Short identifier for the backend kind ("file" or "remote")."""
+
+    @property
+    def database(self) -> Optional[Database]:
+        """Underlying :class:`tinydb.api.Database` for backends that wrap one.
+
+        Returns ``None`` for backends that don't have an in-process
+        database (i.e. remote).  Used by the legacy REPL meta-commands
+        (``.tables``, ``.schema``, ``.explain``) so they don't need to
+        know whether they're looking at a :class:`FileBackend` or a raw
+        :class:`Database`.
+        """
+        return None
+
+    def describe(self) -> Optional[str]:
+        """One-line, human-readable backend description.
+
+        Default is ``None``; subclasses override when they have
+        something meaningful to report (file path, server URI, etc.).
+        Callers MUST NOT reach into private attributes to discover
+        this — use this method instead.
+        """
+        return None
+
 
 class FileBackend(Backend):
     """In-process backend wrapping a :class:`Database`."""
 
     def __init__(self, db: Database) -> None:
         self._db = db
+
+    @property
+    def kind(self) -> str:
+        return "file"
+
+    @property
+    def database(self) -> Optional[Database]:
+        return self._db
+
+    def describe(self) -> Optional[str]:
+        """Return the on-disk path, or ``":memory:"`` if anonymous."""
+        path = getattr(self._db, "_path", None)
+        return str(path) if path is not None else ":memory:"
 
     def execute(self, sql: str) -> BackendResult:
         import time as _time
@@ -118,6 +158,13 @@ class RemoteBackend(Backend):
 
     def __init__(self, client: Client) -> None:
         self._client = client
+
+    @property
+    def kind(self) -> str:
+        return "remote"
+
+    def describe(self) -> Optional[str]:
+        return f"{self._client._host}:{self._client._port}"
 
     def execute(self, sql: str) -> BackendResult:
         import time as _time

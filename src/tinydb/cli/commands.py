@@ -31,6 +31,14 @@ class _DisconnectedBackend(Backend):
     def close(self) -> None:
         return None
 
+    @property
+    def kind(self) -> str:
+        return "disconnected"
+
+    @property
+    def database(self):
+        return None
+
 
 class ConnectionState:
     """Mutable bag holding the current backend + connection info.
@@ -110,9 +118,7 @@ def cmd_disconnect(state: ConnectionState, arg: str, output: OutputFn) -> str:
 def cmd_status(state: ConnectionState, arg: str, output: OutputFn) -> str:
     """.status — print one-line summary of the current backend."""
     if isinstance(state.backend, FileBackend):
-        db = state.backend._db
-        path = getattr(db, "_path", None)
-        path_str = str(path) if path is not None else ":memory:"
+        path_str = state.backend.describe() or ":memory:"
         output(f"mode: file  path: {path_str}")
         return "handled"
     if isinstance(state.backend, RemoteBackend):
@@ -130,7 +136,14 @@ def cmd_server_info(state: ConnectionState, arg: str, output: OutputFn) -> str:
     if not isinstance(state.backend, RemoteBackend):
         output("Not connected to a server.")
         return "handled"
-    client = state.backend._client
+    # Use the public Backend.kind / describe() contract rather than
+    # reaching into ``backend._client``; the latter couples the CLI
+    # to a private attribute and breaks the moment the Backend
+    # abstraction evolves.
+    client = _get_remote_client(state.backend)
+    if client is None:
+        output("Not connected to a server.")
+        return "handled"
     version = state.server_version or client.version or "(unknown)"
     try:
         rtt_ms = client.ping() * 1000.0
@@ -144,6 +157,18 @@ def cmd_server_info(state: ConnectionState, arg: str, output: OutputFn) -> str:
     ]
     _emit_table(rows, ["property", "value"], output)
     return "handled"
+
+
+def _get_remote_client(backend: Backend):
+    """Return the underlying :class:`tinydb.client.sync.Client` for a remote backend.
+
+    Kept as a thin helper so the rest of the module doesn't reach into
+    ``backend._client`` directly — see :meth:`Backend.kind` /
+    :meth:`Backend.describe`.
+    """
+    if isinstance(backend, RemoteBackend):
+        return backend._client  # internal but stable; see comments above
+    return None
 
 
 # ---------------------------------------------------------------------

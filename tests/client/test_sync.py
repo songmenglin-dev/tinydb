@@ -347,7 +347,16 @@ class TestClientReconnect:
 
     def test_execute_retries_after_drop(self, tmp_path):
         """If the first execute raises ConnectionError, the client should
-        transparently reconnect and retry."""
+        transparently reconnect and retry.
+
+        Note: INSERT is not idempotent in general, so the client now
+        defaults to ``retry=False`` for DML.  This test opts in with
+        ``retry=True`` to exercise the retry path; the primary-key
+        constraint makes the INSERT safe to re-execute (the second
+        attempt sees the row already exists and would raise, so a
+        realistic deployment would key on a non-PK column or use an
+        ``INSERT OR IGNORE`` form).
+        """
         from tinydb.api import Database
         from tinydb.client.sync import Client
         db_path = tmp_path / "x.db"
@@ -366,7 +375,7 @@ class TestClientReconnect:
                 # the next execute trigger a reconnect.
                 c._sock.close()
                 c._sock = None
-                result = c.execute("INSERT INTO t VALUES (1, 'a')")
+                result = c.execute("INSERT INTO t VALUES (1, 'a')", retry=True)
                 assert result.rowcount == 1
             finally:
                 c.close()

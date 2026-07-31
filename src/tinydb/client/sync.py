@@ -188,9 +188,15 @@ class Client:
         with self._lock:
             if self._closed:
                 return
-            self._closed = True
             sock = self._sock
             self._sock = None
+        # Mark closed only after we've claimed the socket.  If we
+        # flipped ``_closed`` first, a concurrent ``_collect_response``
+        # could observe ``_closed`` and bail before this thread gets
+        # a chance to flush QUIT — leaving the server waiting for a
+        # graceful disconnect.
+        with self._lock:
+            self._closed = True
         if sock is not None:
             try:
                 fw = FrameWriter(_SocketWriter(sock))
@@ -221,14 +227,22 @@ class Client:
         params: Optional[List[Any]] = None,
         *,
         timeout: float = 30.0,
+        retry: Optional[bool] = None,
     ) -> Result:
         """Execute one SQL statement and return its result.
 
-        Retries up to ``max_retries`` times on connection drop with
-        exponential backoff (100, 200, 400, 800, 1600 ms).
+        ``retry`` controls automatic re-execution after a connection
+        drop with exponential backoff (100, 200, 400, 800, 1600 ms).
+        Defaults to ``True`` for SELECT-style queries and ``False``
+        for DML — silently re-executing an INSERT/UPDATE/DELETE could
+        double-apply the change.  Pass ``retry=True`` explicitly to
+        opt in (e.g. for an idempotent INSERT).
         """
+        if retry is None:
+            retry = self._is_safe_to_retry(sql)
         last_exc: Optional[Exception] = None
-        for attempt in range(self._max_retries + 1):
+        max_attempts = self._max_retries + 1 if retry else 1
+        for attempt in range(max_attempts):
             try:
                 with self._lock:
                     if self._sock is None and attempt == 0:
@@ -253,13 +267,32 @@ class Client:
                 last_exc = e
                 # Drop the dead socket before retrying.
                 self._drop_sock()
-                if attempt >= self._max_retries:
+                if attempt + 1 >= max_attempts:
                     break
                 # Exponential backoff: 100 * 2^attempt ms
                 backoff = (0.1 * (2 ** attempt))
                 time.sleep(backoff)
         assert last_exc is not None
         raise last_exc
+
+    @staticmethod
+    def _is_safe_to_retry(sql: str) -> bool:
+        """Heuristic: True iff ``sql`` starts with a known idempotent keyword.
+
+        Only SELECT (and a couple of explicitly-idempotent forms like
+        ``EXPLAIN``) are considered safe to silently re-execute after
+        a connection drop.  Anything else — INSERT / UPDATE / DELETE /
+        DDL / ``BEGIN``/``COMMIT``/``ROLLBACK`` — would risk
+        double-application if the server had partially processed it
+        before the connection died.
+        """
+        if not sql:
+            return False
+        head = sql.strip().split(None, 1)
+        if not head:
+            return False
+        first = head[0].upper()
+        return first in ("SELECT", "EXPLAIN", "SHOW", "DESCRIBE", "DESC", "WITH")
 
     def _drop_sock(self) -> None:
         """Close the current socket without sending QUIT (server already gone)."""

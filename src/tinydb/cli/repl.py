@@ -43,6 +43,23 @@ OutputFn = Callable[[str], None]
 _HAS_PT: bool = importlib.util.find_spec("prompt_toolkit") is not None
 
 
+def _resolve_db_for_legacy(backend: Union[Database, Backend]) -> Optional[Database]:
+    """Return the in-process :class:`Database` for legacy meta-commands.
+
+    The legacy REPL meta-commands (``.tables``, ``.schema``, ``.explain``)
+    work on a :class:`Database` object.  When ``backend`` is itself a
+    :class:`Database` we use it directly; when it's a
+    :class:`FileBackend` we unwrap it through its public ``.database``
+    property.  When it's a :class:`RemoteBackend` we return ``None``
+    — those commands fall back to "not supported in remote mode".
+    """
+    if isinstance(backend, Database):
+        return backend
+    if isinstance(backend, Backend):
+        return backend.database
+    return None
+
+
 def _default_output(line: str) -> None:
     import builtins
     builtins.print(line, flush=True)
@@ -347,9 +364,7 @@ def _run_prompt_toolkit_repl(backend: Union[Database, Backend]) -> int:  # pragm
     session = _build_prompt_session(history=history, lexer=lexer)
     mode = ["table"]
 
-    db = backend._db if isinstance(backend, FileBackend) else (
-        backend if isinstance(backend, Database) else None
-    )
+    db = _resolve_db_for_legacy(backend)
     state = ConnectionState(backend)
 
     buffer = ""
@@ -408,9 +423,7 @@ def _run_cmd_fallback(backend: Union[Database, Backend]) -> int:
     sys.stdout.flush()
 
     # Pull the wrapped Database out of FileBackend so meta-commands work.
-    db = backend._db if isinstance(backend, FileBackend) else (
-        backend if isinstance(backend, Database) else None
-    )
+    db = _resolve_db_for_legacy(backend)
     state = ConnectionState(backend)
 
     class _CmdShell:
@@ -481,9 +494,7 @@ def _run_legacy(backend: Union[Database, Backend], input_fn: InputFn, output: Ou
     """Run the v0.1-style REPL loop with an injected ``input_fn``."""
     output("tinydb v0.1 REPL - enter SQL, or '.help' for commands")
     mode_holder: list = ["table"]
-    db = backend._db if isinstance(backend, FileBackend) else (
-        backend if isinstance(backend, Database) else None
-    )
+    db = _resolve_db_for_legacy(backend)
     state = ConnectionState(backend)
     buffer = ""
     while True:
