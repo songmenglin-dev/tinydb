@@ -34,9 +34,13 @@ class ServerSession:
     "writer" is a list of frames that accumulates what would be sent
     on the wire.  The production :meth:`serve` coroutine bridges to an
     asyncio StreamWriter.
+
+    ``reader`` is optional — when None the session is intended for
+    use via :meth:`serve`, which creates its own :class:`FrameReader`
+    bound to the asyncio transport.
     """
 
-    def __init__(self, reader: FrameReader, db, *, hello_timeout: float = 5.0) -> None:
+    def __init__(self, db, reader: Optional[FrameReader] = None, *, hello_timeout: float = 5.0) -> None:
         self._reader = reader
         self._db = db
         self._hello_timeout = hello_timeout
@@ -48,8 +52,12 @@ class ServerSession:
     async def run_once(self) -> List[Frame]:
         """Process one frame from the reader and return the responses.
 
-        Used by the unit tests.  Returns ``[]`` on EOF.
+        Used by the unit tests.  Returns ``[]`` on EOF.  Raises
+        :class:`RuntimeError` if no reader was wired in (i.e. the
+        session is meant to be driven via :meth:`serve`).
         """
+        if self._reader is None:
+            raise RuntimeError("ServerSession has no reader; use serve() instead")
         frame = self._reader.read_frame()
         if frame is None:
             return []
@@ -112,11 +120,16 @@ class ServerSession:
             return [
                 ResultError(code="25000", msg="no active transaction").to_frame()
             ]
+        tx = self._tx
+        # Clear self._tx BEFORE invoking the txn so a failed commit
+        # doesn't leave the session wedged in "active transaction"
+        # state forever — the client should be able to issue ROLLBACK
+        # to recover.
+        self._tx = None
         try:
-            self._db._txn.commit(self._tx)
+            self._db._txn.commit(tx)
         except Exception as e:
             return [ResultError(code="25000", msg=str(e)).to_frame()]
-        self._tx = None
         return [ResultDone(rowcount=0, last_insert_id=0, status_flags=0x01).to_frame()]
 
     def _handle_rollback(self) -> List[Frame]:
@@ -124,11 +137,12 @@ class ServerSession:
             return [
                 ResultError(code="25000", msg="no active transaction").to_frame()
             ]
+        tx = self._tx
+        self._tx = None
         try:
-            self._db._txn.rollback(self._tx)
+            self._db._txn.rollback(tx)
         except Exception as e:
             return [ResultError(code="25000", msg=str(e)).to_frame()]
-        self._tx = None
         return [ResultDone(rowcount=0, last_insert_id=0, status_flags=0x01).to_frame()]
 
     def _auto_rollback(self) -> None:
@@ -143,18 +157,38 @@ class ServerSession:
     # -- production bridge --------------------------------------------
 
     async def serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Drive the session over an asyncio stream pair."""
+        """Drive the session over an asyncio stream pair.
+
+        The loop guards against a partial TCP header (returning on
+        EOF instead of raising) and against a length-prefix that
+        exceeds :data:`MAX_FRAME_LEN` (treated as a protocol error
+        rather than letting the connection hang).
+        """
+        from tinydb.protocol.frame import MAX_FRAME_LEN
         frame_reader = FrameReader()
         frame_writer = FrameWriter(writer)
         try:
             while True:
-                header = await reader.read(6)
-                if not header or len(header) < 6:
+                # ``reader.readexactly`` raises IncompleteReadError on
+                # EOF, which we catch below.  Reading the header in
+                # one ``readexactly`` call (instead of a non-strict
+                # ``read(6)``) keeps the connection in lock-step with
+                # the client and avoids spurious partial-header errors.
+                try:
+                    header = await reader.readexactly(6)
+                except asyncio.IncompleteReadError:
+                    return
+                if len(header) < 6:
                     return
                 length = int.from_bytes(header[:4], "big")
-                rest = await reader.readexactly(length)
-                # feed() returns a frame if the buffered bytes form a
-                # complete one; pass it along to the handler.
+                if length > MAX_FRAME_LEN:
+                    # Malicious or corrupted peer — abort the
+                    # connection rather than allocate up to 16 MiB.
+                    return
+                try:
+                    rest = await reader.readexactly(length)
+                except asyncio.IncompleteReadError:
+                    return
                 f = frame_reader.feed(header + rest)
                 if f is None:
                     continue
@@ -164,7 +198,7 @@ class ServerSession:
                 await writer.drain()
                 if f.type == MessageType.QUIT:
                     return
-        except (asyncio.IncompleteReadError, ConnectionError):
+        except (ConnectionError, ProtocolError):
             return
         finally:
             self._auto_rollback()

@@ -45,20 +45,25 @@ class _BlockingDB:
 def _start_server_in_thread(config: ServerConfig) -> tuple:
     """Start ``run_server`` in a background thread.
 
-    Returns ``(server, thread, ready_event)``.
+    Returns ``(thread, stop)`` where ``stop`` is a thread-safe callable
+    that asks the server's loop to close the listening socket and
+    shut down.  We deliberately do NOT touch module-level state — the
+    earlier ``_app._shutdown_event.set()`` pattern leaked between
+    tests because the event was bound to whatever loop happened to be
+    current at import time.
     """
-    from tinydb.server import app as _app
     ready = threading.Event()
-    started_holder: dict = {}
+    loop_holder: dict = {}
 
     def _runner():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        server = None
+        loop_holder["loop"] = loop
+        server_holder: dict = {}
 
         async def _main():
-            nonlocal server
             server = await run_server(config, on_ready=ready.set)
+            server_holder["server"] = server
             await server.serve_forever()
         try:
             loop.run_until_complete(_main())
@@ -69,7 +74,22 @@ def _start_server_in_thread(config: ServerConfig) -> tuple:
     thread.start()
     if not ready.wait(timeout=5.0):
         raise RuntimeError("server failed to start")
-    return thread
+
+    def stop():
+        loop = loop_holder.get("loop")
+        server = loop_holder.get("server_holder", {})
+        # ``server_holder`` is a local in _runner; recover by reaching
+        # for the asyncio server object we stashed on the loop's debug
+        # name attribute via run_server.  Simpler: ask the loop to
+        # close every active asyncio.Server it owns.
+        if loop is None:
+            return
+        def _shutdown():
+            for srv in list(getattr(loop, "_servers", {}).values()):
+                srv.close()
+        loop.call_soon_threadsafe(_shutdown)
+
+    return thread, stop
 
 
 def _read_one_frame(sock: socket.socket, fr: FrameReader):
@@ -142,7 +162,7 @@ class TestServerLifecycle:
         port = _free_port()
         config = ServerConfig(db_path=tmp_path / "x.db", host="127.0.0.1", port=port)
         db = _BlockingDB()
-        thread = _start_server_in_thread(config)
+        thread, stop = _start_server_in_thread(config)
         try:
             # Connect to the server.
             with socket.create_connection(("127.0.0.1", port), timeout=2.0) as sock:
@@ -162,10 +182,7 @@ class TestServerLifecycle:
                 assert resp is not None
                 assert resp.type == MessageType.OK
         finally:
-            from tinydb.server import app as _app
-            # The server does not auto-stop on its own; we shut down via
-            # the helper used by the main function.
-            _app._shutdown_event.set()
+            stop()
             thread.join(timeout=5.0)
 
     def test_run_server_bind_error(self, tmp_path):

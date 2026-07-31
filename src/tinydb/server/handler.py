@@ -68,18 +68,44 @@ def _format_value(v) -> str:
 
 
 def _substitute_params(sql: str, params: list) -> str:
-    """Replace ``?`` placeholders in ``sql`` with formatted values."""
-    out = []
+    """Replace ``?`` placeholders in ``sql`` with formatted values.
+
+    Implements a proper string-literal state machine so SQL's ``''``
+    escape (a doubled single quote inside a literal) does not flip
+    the in-string flag and so ``?`` placeholders inside literals are
+    left untouched.
+    """
+    out: list[str] = []
     pi = 0
     in_string = False
-    for ch in sql:
+    i = 0
+    n = len(sql)
+    while i < n:
+        ch = sql[i]
+        if in_string:
+            if ch == "'":
+                # Either end of literal (``'``) or escaped quote
+                # (``''`` — two apostrophes together).
+                if i + 1 < n and sql[i + 1] == "'":
+                    out.append("''")
+                    i += 2
+                    continue
+                in_string = False
+            out.append(ch)
+            i += 1
+            continue
         if ch == "'":
-            in_string = not in_string
-        if ch == "?" and not in_string and pi < len(params):
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "?" and pi < len(params):
             out.append(_format_value(params[pi]))
             pi += 1
-        else:
-            out.append(ch)
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
     return "".join(out)
 
 
@@ -182,18 +208,14 @@ def dispatch_exec(msg: Exec, db) -> List[Frame]:
     kind = _classify(substituted)
     try:
         rows = db.execute(substituted)
-    except Exception as e:
-        # Re-use the Query error path so error mapping is consistent.
-        try:
-            raise e
-        except ParseError as pe:
-            return [ResultError(code="42000", msg=f"syntax error: {pe.msg}").to_frame()]
-        except (ConstraintViolation, NotNullViolation) as cv:
-            return [ResultError(code="22000", msg=str(cv)).to_frame()]
-        except TypeMismatchError as te:
-            return [ResultError(code="22000", msg=str(te)).to_frame()]
-        except TinydbError as te:
-            return [ResultError(code="HY000", msg=str(te)).to_frame()]
+    except ParseError as pe:
+        return [ResultError(code="42000", msg=f"syntax error: {pe.msg}").to_frame()]
+    except (ConstraintViolation, NotNullViolation) as cv:
+        return [ResultError(code="22000", msg=str(cv)).to_frame()]
+    except TypeMismatchError as te:
+        return [ResultError(code="22000", msg=str(te)).to_frame()]
+    except TinydbError as te:
+        return [ResultError(code="HY000", msg=str(te)).to_frame()]
     if kind == "ddl":
         return [
             ResultDone(rowcount=0, last_insert_id=0, status_flags=0x01).to_frame()

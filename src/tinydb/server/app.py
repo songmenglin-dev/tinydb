@@ -25,7 +25,13 @@ from tinydb.server.session import ServerSession
 logger = logging.getLogger("tinydb.server")
 
 
-_shutdown_event: asyncio.Event = asyncio.Event()
+# ``_shutdown_event`` is created lazily inside :func:`main` so it
+# binds to the dedicated event loop the server actually runs on,
+# rather than to whatever loop happened to be current at import time
+# (which on a freshly-imported module would be no loop at all — and
+# in test runners that touch the loop early can be a loop the
+# server never sees).
+_shutdown_event: Optional[asyncio.Event] = None
 
 
 async def _handle_connection(
@@ -34,10 +40,7 @@ async def _handle_connection(
     db: Database,
 ) -> None:
     """Per-connection coroutine: hand off to a :class:`ServerSession`."""
-    session = ServerSession(
-        reader=None,  # type: ignore[arg-type]  # unused for the asyncio path
-        db=db,
-    )
+    session = ServerSession(db=db)
     await session.serve(reader, writer)
 
 
@@ -69,8 +72,10 @@ async def run_server(
 def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     """Register SIGINT/SIGTERM → graceful shutdown."""
     def _stop() -> None:
+        global _shutdown_event
         logger.info("shutdown signal received")
-        _shutdown_event.set()
+        if _shutdown_event is not None:
+            _shutdown_event.set()
 
     # Module-level wrappers instead of inline lambdas: lambdas create
     # a new closure each call which (a) prevents signal.signal() from
@@ -121,12 +126,15 @@ def main(argv: Optional[list] = None) -> int:
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
     _install_signal_handlers(loop)
 
     async def _serve():
         db = Database(config.db_path)
         server = await run_server(config, db=db)
         try:
+            assert _shutdown_event is not None  # for type checkers
             await _shutdown_event.wait()
         finally:
             server.close()
