@@ -17,10 +17,19 @@ import java.util.Properties;
 public class TinyConnection implements Connection {
 
     @Override
-    public void setReadOnly(boolean p0) throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public void setReadOnly(boolean p0) throws java.sql.SQLException {
+        // HikariCP and Spring both probe isReadOnly() at connection
+        // checkout.  v0.3 doesn't model read-only transactions, so
+        // accept any value silently.
+        checkOpen();
+    }
 
     @Override
-    public boolean isReadOnly() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public boolean isReadOnly() throws java.sql.SQLException {
+        // Always false — v0.3 has no read-only transaction mode.
+        checkOpen();
+        return false;
+    }
 
     @Override
     public java.sql.CallableStatement prepareCall(java.lang.String p0, int p1, int p2, int p3) throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
@@ -35,13 +44,26 @@ public class TinyConnection implements Connection {
     public void setTransactionIsolation(int p0) throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
 
     @Override
-    public int getTransactionIsolation() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public int getTransactionIsolation() throws java.sql.SQLException {
+        // Spring/Hikari call this on every connection checkout.  v0.3
+        // only models READ COMMITTED semantics (see REQ-SRV-3), so report
+        // that level rather than throwing — drivers must not raise here
+        // per the JDBC contract.
+        checkOpen();
+        return java.sql.Connection.TRANSACTION_READ_COMMITTED;
+    }
 
     @Override
-    public java.sql.SQLWarning getWarnings() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public java.sql.SQLWarning getWarnings() throws java.sql.SQLException {
+        checkOpen();
+        return null;
+    }
 
     @Override
-    public void clearWarnings() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public void clearWarnings() throws java.sql.SQLException {
+        checkOpen();
+        // no-op: v0.3 never reports warnings on the wire.
+    }
 
     @Override
     public java.util.Map getTypeMap() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
@@ -101,10 +123,24 @@ public class TinyConnection implements Connection {
     public java.lang.String getSchema() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
 
     @Override
-    public void setNetworkTimeout(java.util.concurrent.Executor p0, int p1) throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public void setNetworkTimeout(java.util.concurrent.Executor p0, int p1) throws java.sql.SQLException {
+        // HikariCP calls this on every checkout to probe for the
+        // driver's network-timeout support.  Per the JDBC 4.2
+        // contract, drivers that don't support it MUST throw
+        // SQLFeatureNotSupportedException — but throwing
+        // SQLException("not supported") works in practice for
+        // HikariCP (it logs a warning and moves on).  v0.3 doesn't
+        // model per-statement socket timeouts, so accept any value
+        // and store it for getNetworkTimeout to echo back.
+        checkOpen();
+        this.networkTimeoutMillis = p1;
+    }
 
     @Override
-    public int getNetworkTimeout() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public int getNetworkTimeout() throws java.sql.SQLException {
+        checkOpen();
+        return this.networkTimeoutMillis;
+    }
 
     @Override
     public void abort(java.util.concurrent.Executor p0) throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
@@ -131,6 +167,7 @@ public class TinyConnection implements Connection {
     private final String serverVersion;
     private boolean closed = false;
     private boolean autoCommit = true;
+    private int networkTimeoutMillis = 0;
     private String catalog;
     private final Object sendLock = new Object();
 

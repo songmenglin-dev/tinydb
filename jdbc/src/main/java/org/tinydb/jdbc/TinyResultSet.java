@@ -35,7 +35,7 @@ public class TinyResultSet implements ResultSet {
     public java.net.URL getURL(java.lang.String p0) throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
 
     @Override
-    public int getType() throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }
+    public int getType() throws SQLException { return TYPE_FORWARD_ONLY; }
 
     @Override
     public java.sql.Ref getRef(java.lang.String p0) throws java.sql.SQLException { throw new SQLException("not supported in v0.3", "HY000"); }

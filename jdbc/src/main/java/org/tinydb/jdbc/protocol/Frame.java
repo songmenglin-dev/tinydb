@@ -48,26 +48,31 @@ public final class Frame {
         if (len > MAX_FRAME_SIZE) {
             throw new IOException("frame too large: " + len);
         }
-        // LEN counts type+flags+payload, so the minimum valid value
-        // is 2 (carrying a 0-byte payload).  Anything smaller would
-        // allocate a negative-size array below.
-        if (len < 2) {
-            throw new IOException("frame length too small: " + len);
+        if (len < 0) {
+            throw new IOException("frame length negative: " + len);
         }
         byte type = in.readByte();
         byte flags = in.readByte();
-        byte[] payload = new byte[len - 2];
+        byte[] payload = new byte[len];
         in.readFully(payload);
         return new Frame(len, type, flags, payload);
     }
 
     /**
      * Write frame to stream.
+     *
+     * Wire format (REQ-PROTO-1):
+     *   [LEN(4B BE)][TYPE(1B)][FLAGS(1B)][PAYLOAD(LEN bytes)]
+     *
+     * LEN encodes the payload length ONLY — the type and flags bytes
+     * are fixed header overhead and are NOT counted in LEN.  This
+     * matches the Python wire implementation in
+     * {@code src/tinydb/protocol/frame.py} so the Java driver speaks
+     * the same bytes as {@code tinydb.client.Client}.
      */
     public void write(DataOutputStream out) throws IOException {
-        // Verify size is consistent
-        if (len != payload.length + 2) {
-            throw new IOException("frame length mismatch: " + len + " != payload+2 (" + (payload.length + 2) + ")");
+        if (len != payload.length) {
+            throw new IOException("frame length mismatch: " + len + " != payload (" + payload.length + ")");
         }
         if (len > MAX_FRAME_SIZE) {
             throw new IOException("frame too large: " + len);

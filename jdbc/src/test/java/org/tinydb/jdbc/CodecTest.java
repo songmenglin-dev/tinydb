@@ -129,7 +129,7 @@ class CodecTest {
     void testQuitFrame() {
         Frame q = Codec.encodeQuit();
         assertEquals(Codec.TYPE_QUIT, q.getType());
-        assertEquals(2, q.getLen()); // empty payload = 0 bytes, len = 2
+        assertEquals(0, q.getLen()); // empty payload = 0 bytes, len = 2
     }
 
     @Test
@@ -148,7 +148,7 @@ class CodecTest {
         payload[off++] = (byte) val.length;
         System.arraycopy(val, 0, payload, off, val.length); off += val.length;
         payload[off++] = Codec.WIRE_STRING;
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_HEADER, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_HEADER, (byte) 0, payload);
         List<Codec.Column> cols = Codec.decodeResultHeader(f);
         assertEquals(2, cols.size());
         assertEquals("name", cols.get(0).name);
@@ -177,7 +177,7 @@ class CodecTest {
         dos.writeInt(1);
         dos.writeByte(1);
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
         List<Object> values = Codec.decodeResultRow(f);
         assertEquals(3, values.size());
         assertEquals(42L, values.get(0));
@@ -194,7 +194,7 @@ class CodecTest {
         dos.writeLong(5L); // last_insert_id
         dos.writeByte(0x05); // flags
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_DONE, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_DONE, (byte) 0, payload);
         Codec.DoneInfo info = Codec.decodeResultDone(f);
         assertEquals(1L, info.rowcount);
         assertEquals(5L, info.lastInsertId);
@@ -211,7 +211,7 @@ class CodecTest {
         dos.writeShort(msg.length);
         dos.write(msg);
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_ERROR, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_ERROR, (byte) 0, payload);
         String[] parts = Codec.decodeResultError(f);
         assertEquals("42000", parts[0]);
         assertEquals("syntax error", parts[1]);
@@ -226,7 +226,7 @@ class CodecTest {
         dos.writeByte(Codec.WIRE_NULL);
         dos.writeInt(0);
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
         List<Object> values = Codec.decodeResultRow(f);
         assertNull(values.get(0));
     }
@@ -241,7 +241,7 @@ class CodecTest {
         dos.writeInt(8);
         dos.writeDouble(3.14);
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
         List<Object> values = Codec.decodeResultRow(f);
         assertEquals(3.14, (Double) values.get(0), 0.001);
     }
@@ -250,7 +250,7 @@ class CodecTest {
     @DisplayName("OK decode returns version string")
     void testDecodeOk() {
         byte[] payload = "tinydb-0.3.0".getBytes();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_OK, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_OK, (byte) 0, payload);
         assertEquals("tinydb-0.3.0", Codec.decodeOk(f));
     }
 
@@ -265,7 +265,7 @@ class CodecTest {
         payload[5] = 0;
         payload[6] = (byte) msg.length;
         System.arraycopy(msg, 0, payload, 7, msg.length);
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_ERR, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_ERR, (byte) 0, payload);
         String s = Codec.decodeErr(f);
         assertTrue(s.contains("08000"));
         assertTrue(s.contains("HELLO required"));

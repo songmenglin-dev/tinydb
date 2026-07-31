@@ -35,7 +35,7 @@ class MessagesTest {
     @DisplayName("OK (0x02): server version in payload")
     void testOk() throws Exception {
         byte[] version = "tinydb-0.3.0".getBytes("UTF-8");
-        Frame f = new Frame(version.length + 2, Codec.TYPE_OK, (byte) 0, version);
+        Frame f = new Frame(version.length, Codec.TYPE_OK, (byte) 0, version);
         assertEquals(Codec.TYPE_OK, f.getType());
         assertEquals("tinydb-0.3.0", Codec.decodeOk(f));
     }
@@ -50,7 +50,7 @@ class MessagesTest {
         dos.writeShort(msg.length);
         dos.write(msg);
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_ERR, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_ERR, (byte) 0, payload);
         assertEquals(Codec.TYPE_ERR, f.getType());
         String s = Codec.decodeErr(f);
         assertTrue(s.startsWith("08000"));
@@ -103,7 +103,7 @@ class MessagesTest {
             }
         } catch (Exception e) { throw new RuntimeException(e); }
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_HEADER, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_HEADER, (byte) 0, payload);
         List<Codec.Column> decoded = Codec.decodeResultHeader(f);
         assertEquals(2, decoded.size());
         assertEquals("id", decoded.get(0).name);
@@ -125,7 +125,7 @@ class MessagesTest {
         dos.writeInt(5);
         dos.write("hello".getBytes("UTF-8"));
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_ROW, (byte) 0, payload);
         List<Object> vals = Codec.decodeResultRow(f);
         assertEquals(2, vals.size());
         assertEquals(42L, vals.get(0));
@@ -141,7 +141,7 @@ class MessagesTest {
         dos.writeLong(7);    // last_insert_id
         dos.writeByte(0x05); // AUTOCOMMIT | NO_RESULT
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_DONE, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_DONE, (byte) 0, payload);
         Codec.DoneInfo info = Codec.decodeResultDone(f);
         assertEquals(10L, info.rowcount);
         assertEquals(7L, info.lastInsertId);
@@ -158,7 +158,7 @@ class MessagesTest {
         dos.writeShort(msg.length);
         dos.write(msg);
         byte[] payload = baos.toByteArray();
-        Frame f = new Frame(payload.length + 2, Codec.TYPE_RESULT_ERROR, (byte) 0, payload);
+        Frame f = new Frame(payload.length, Codec.TYPE_RESULT_ERROR, (byte) 0, payload);
         String[] parts = Codec.decodeResultError(f);
         assertEquals("22000", parts[0]);
         assertEquals("UNIQUE constraint violated", parts[1]);
@@ -187,7 +187,7 @@ class MessagesTest {
         Frame f = Codec.encodeQuit();
         assertEquals(Codec.TYPE_QUIT, f.getType());
         assertEquals(0, f.getPayload().length);
-        assertEquals(2, f.getLen()); // header-only
+        assertEquals(0, f.getLen()); // header-only
     }
 
     @Test

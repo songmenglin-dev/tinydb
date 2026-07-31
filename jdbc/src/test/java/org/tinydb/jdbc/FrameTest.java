@@ -22,7 +22,7 @@ class FrameTest {
     @DisplayName("Frame roundtrip: write then read preserves fields")
     void testRoundtrip() throws IOException {
         byte[] payload = "hello".getBytes("UTF-8");
-        Frame original = new Frame(payload.length + 2, (byte) 0x10, (byte) 0x00, payload);
+        Frame original = new Frame(payload.length, (byte) 0x10, (byte) 0x00, payload);
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
@@ -42,7 +42,7 @@ class FrameTest {
     @DisplayName("Frame write produces big-endian length prefix")
     void testBigEndianLength() throws IOException {
         byte[] payload = new byte[0];
-        Frame frame = new Frame(2, (byte) 0x10, (byte) 0x00, payload);
+        Frame frame = new Frame(0, (byte) 0x10, (byte) 0x00, payload);
 
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         DataOutputStream dos = new DataOutputStream(baos);
@@ -63,7 +63,7 @@ class FrameTest {
     @DisplayName("Frame with len=0xFFFFFF (max) roundtrips")
     void testMaxSizeFrame() throws IOException {
         int totalLen = Frame.MAX_FRAME_SIZE;
-        byte[] payload = new byte[totalLen - 2];
+        byte[] payload = new byte[totalLen];
         payload[0] = (byte) 0xAB;
         Frame frame = new Frame(totalLen, (byte) 0x01, (byte) 0x00, payload);
 

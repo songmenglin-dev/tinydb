@@ -212,7 +212,8 @@ public final class Codec {
     // ===== Helpers =====
 
     private static Frame makeFrame(byte type, byte[] data) {
-        return new Frame(data.length + 2, type, (byte) 0x00, data);
+        // LEN is payload length only (see Frame.write doc).
+        return new Frame(data.length, type, (byte) 0x00, data);
     }
 
     private static long readLongBE(byte[] b, int off) {
