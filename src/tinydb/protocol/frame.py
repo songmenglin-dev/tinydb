@@ -2,11 +2,13 @@
 
 A frame is the outer envelope used by every tinydb wire-proto message:
 
-    [LEN(4B BE)][TYPE(1B)][FLAGS(1B)][PAYLOAD(LEN-2 bytes)]
+    [LEN(4B BE)][TYPE(1B)][FLAGS(1B)][PAYLOAD(LEN bytes)]
 
-The length prefix counts the type + flags + payload bytes (so the
-minimum non-empty frame is LEN=2 carrying a 0-byte payload).  The
-maximum value is 0xFFFFFF (16 MiB - 1), per REQ-PROTO-1.
+The LEN prefix counts **only** the payload bytes — it does **not**
+include the type/flags bytes.  The minimum non-empty frame is
+therefore LEN=0 carrying no payload (the type and flags are still
+transmitted), and the maximum is 0xFFFFFF (16 MiB - 1, per
+REQ-PROTO-1).
 
 This module is the lowest layer of the protocol stack; it depends on
 nothing else from tinydb beyond :mod:`tinydb.errors`.
@@ -38,10 +40,8 @@ class Frame:
     """A single wire-protocol frame.
 
     Attributes:
-        len: Length of the inner message (type + flags + payload).  In
-            v0.3 this is normally derived from the payload size at
-            encode time; kept as an explicit field for round-trip
-            tests and so the value matches the wire bytes.
+        len: Length of the *payload* in bytes (does NOT count the
+            type/flags bytes).  For an empty frame this is 0.
         type: One-byte message-type code (REQ-PROTO-2).
         flags: One-byte message flags (REQ-PROTO-1).
         payload: Raw bytes carried by the frame.
@@ -61,13 +61,19 @@ class Frame:
             raise ValueError(
                 f"frame len must be 0..{MAX_FRAME_LEN}, got {self.len}"
             )
-        # In v0.3 the wire LEN field is the payload length (it does
-        # NOT include the type/flags bytes — see REQ-PROTO-1: the
-        # outer frame is simply [LEN][TYPE][FLAGS][PAYLOAD(LEN bytes)]).
-        # Auto-derive the value when the caller left it at the default
-        # 0 so most call sites don't have to maintain it manually.
+        # ``self.len`` is the payload length — it MUST match
+        # ``len(self.payload)`` exactly.  A bare ``Frame(payload=...)``
+        # call (which leaves ``len`` at the default 0) is auto-derived
+        # for ergonomics, but an explicit mismatch is now an error so
+        # caller mistakes (e.g. transposed length and type) fail loudly
+        # instead of being silently coerced.
         if self.len == 0 and self.payload:
             self.len = len(self.payload)
+        elif self.len != len(self.payload):
+            raise ValueError(
+                f"frame len {self.len} does not match payload length "
+                f"{len(self.payload)}"
+            )
 
     # -- encoding ----------------------------------------------------
 

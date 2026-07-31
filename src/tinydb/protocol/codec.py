@@ -91,19 +91,33 @@ class FrameReader:
 
         Returns ``None`` on EOF.  Raises :class:`IncompleteFrameError`
         if the stream is short (the caller may try again later).
+        Raises :class:`ProtocolError` if the buffer holds a malformed
+        length prefix.
+
+        Note: the no-stream branch can no longer return ``None`` on a
+        *partial* buffered frame — it raises :class:`IncompleteFrameError`
+        so callers don't accidentally busy-loop.  Use :meth:`feed` for
+        the chunk-based variant which preserves the ``None``/data
+        handshake.
         """
         # Without a stream we rely on feed() and only return a frame
         # once the buffer holds a complete one.
         if self._stream is None:
-            if len(self._buffer) < 4:
-                return None
+            if len(self._buffer) < _HEADER_SIZE:
+                raise IncompleteFrameError(
+                    f"buffer short on no-stream read_frame: "
+                    f"have {len(self._buffer)}, need {_HEADER_SIZE}"
+                )
             length = struct.unpack(">I", self._buffer[:4])[0]
             if length > MAX_FRAME_LEN:
                 raise ProtocolError(
                     f"frame length {length} exceeds {MAX_FRAME_LEN} (0xFFFFFF)"
                 )
             if len(self._buffer) < _HEADER_SIZE + length:
-                return None
+                raise IncompleteFrameError(
+                    f"buffer short on no-stream read_frame: "
+                    f"have {len(self._buffer)}, need {_HEADER_SIZE + length}"
+                )
             target = _HEADER_SIZE + length
             parsed = Frame.from_bytes(bytes(self._buffer[:target]))
             del self._buffer[:target]
@@ -139,10 +153,11 @@ class FrameReader:
     def feed(self, data: bytes) -> Optional[Frame]:
         """Append ``data`` to the internal buffer and return a frame if ready.
 
-        Returns the next complete frame, or ``None`` if more bytes are
-        needed.  Raises :class:`IncompleteFrameError` if the buffered
-        bytes are still short, and :class:`ProtocolError` on malformed
-        inputs.
+        Returns the next complete frame, or ``None`` if the buffered
+        bytes are still short (more bytes needed).  Raises
+        :class:`ProtocolError` if the length prefix exceeds
+        :data:`MAX_FRAME_LEN` or the buffered bytes are otherwise
+        malformed.
         """
         if data:
             self._buffer.extend(data)

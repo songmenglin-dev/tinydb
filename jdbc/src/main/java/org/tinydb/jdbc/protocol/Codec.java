@@ -242,8 +242,12 @@ public final class Codec {
 
     private static Object decodeValue(byte type, byte[] data) {
         switch (type) {
-            case WIRE_NULL: return null;
+            case WIRE_NULL:
+                return null;
             case WIRE_INT64: {
+                if (data.length < 8) {
+                    throw new IllegalArgumentException("INT64 data too short: " + data.length);
+                }
                 long v = ((long)(data[0] & 0xFF) << 56) | ((long)(data[1] & 0xFF) << 48) |
                           ((long)(data[2] & 0xFF) << 40) | ((long)(data[3] & 0xFF) << 32) |
                           ((long)(data[4] & 0xFF) << 24) | ((long)(data[5] & 0xFF) << 16) |
@@ -251,6 +255,9 @@ public final class Codec {
                 return v;
             }
             case WIRE_FLOAT64: {
+                if (data.length < 8) {
+                    throw new IllegalArgumentException("FLOAT64 data too short: " + data.length);
+                }
                 long bits = ((long)(data[0] & 0xFF) << 56) | ((long)(data[1] & 0xFF) << 48) |
                             ((long)(data[2] & 0xFF) << 40) | ((long)(data[3] & 0xFF) << 32) |
                             ((long)(data[4] & 0xFF) << 24) | ((long)(data[5] & 0xFF) << 16) |
@@ -259,8 +266,12 @@ public final class Codec {
             }
             case WIRE_STRING:
                 return new String(data, StandardCharsets.UTF_8);
-            case WIRE_BOOL:
+            case WIRE_BOOL: {
+                if (data.length < 1) {
+                    throw new IllegalArgumentException("BOOL data too short: " + data.length);
+                }
                 return data[0] != 0;
+            }
             default:
                 throw new IllegalArgumentException("unknown wire type: 0x" + String.format("%02X", type & 0xFF));
         }

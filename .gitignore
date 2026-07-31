@@ -57,3 +57,6 @@ coverage.xml
 
 # spec-superflow worktrees
 .claude/worktrees/
+
+# Maven build artifacts (JDBC subproject)
+jdbc/target/

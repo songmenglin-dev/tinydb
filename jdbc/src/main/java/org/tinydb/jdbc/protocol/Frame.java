@@ -48,6 +48,12 @@ public final class Frame {
         if (len > MAX_FRAME_SIZE) {
             throw new IOException("frame too large: " + len);
         }
+        // LEN counts type+flags+payload, so the minimum valid value
+        // is 2 (carrying a 0-byte payload).  Anything smaller would
+        // allocate a negative-size array below.
+        if (len < 2) {
+            throw new IOException("frame length too small: " + len);
+        }
         byte type = in.readByte();
         byte flags = in.readByte();
         byte[] payload = new byte[len - 2];

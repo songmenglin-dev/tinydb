@@ -13,6 +13,11 @@ in REQ-PROTO-2:
 Each message exposes a ``to_frame()`` method that returns a
 :class:`Frame` with the right type code and payload, and a
 ``from_frame(frame)`` classmethod that does the reverse.
+
+All inbound ``from_frame`` decoders defensively validate every
+length-prefixed field against the actual payload size before
+slicing, so a malicious peer cannot coax us into a negative slice,
+out-of-bounds index, or unbounded allocation.
 """
 from __future__ import annotations
 
@@ -25,6 +30,23 @@ from tinydb.protocol.frame import Frame
 
 MAX_PARAMS: int = 1024
 MAX_CLIENT_ID: int = 64
+# Cap the size of any single decoded SQL/exec payload so a hostile
+# peer cannot send a multi-megabyte "sql_len" prefix and force us to
+# allocate it before we reject the frame.
+MAX_SQL_LEN: int = 1 << 20  # 1 MiB
+MAX_ERR_MSG_LEN: int = 1 << 16  # 64 KiB
+
+
+class FrameTruncatedError(ValueError):
+    """Raised when a frame payload is too short for the declared layout."""
+
+
+def _require(payload: bytes, need: int, what: str) -> None:
+    """Assert that ``len(payload) >= need`` or raise FrameTruncatedError."""
+    if len(payload) < need:
+        raise FrameTruncatedError(
+            f"{what}: need {need} bytes, have {len(payload)}"
+        )
 
 
 class MessageType(IntEnum):
@@ -118,9 +140,16 @@ class Err:
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "Err":
-        code = frame.payload[:5].decode("ascii")
-        (msg_len,) = struct.unpack(">H", frame.payload[5:7])
-        msg = frame.payload[7 : 7 + msg_len].decode("utf-8")
+        payload = frame.payload
+        _require(payload, 7, "ERR header")
+        code = payload[:5].decode("ascii")
+        (msg_len,) = struct.unpack(">H", payload[5:7])
+        if msg_len > MAX_ERR_MSG_LEN:
+            raise ValueError(
+                f"ERR msg too long: {msg_len} > {MAX_ERR_MSG_LEN}"
+            )
+        _require(payload, 7 + msg_len, "ERR msg")
+        msg = payload[7 : 7 + msg_len].decode("utf-8")
         return cls(code=code, msg=msg)
 
 
@@ -138,6 +167,10 @@ class Query:
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "Query":
+        if len(frame.payload) > MAX_SQL_LEN:
+            raise ValueError(
+                f"QUERY sql too long: {len(frame.payload)} > {MAX_SQL_LEN}"
+            )
         return cls(sql=frame.payload.decode("utf-8"))
 
 
@@ -186,28 +219,46 @@ class Exec:
     @classmethod
     def from_frame(cls, frame: Frame) -> "Exec":
         payload = frame.payload
+        _require(payload, 4, "EXEC sql_len prefix")
         (sql_len,) = struct.unpack(">I", payload[:4])
+        if sql_len > MAX_SQL_LEN:
+            raise ValueError(
+                f"EXEC sql_len too large: {sql_len} > {MAX_SQL_LEN}"
+            )
+        _require(payload, 4 + sql_len + 2, "EXEC sql+param_count")
         sql = payload[4 : 4 + sql_len].decode("utf-8")
         offset = 4 + sql_len
         (param_count,) = struct.unpack(">H", payload[offset : offset + 2])
         offset += 2
+        if param_count > MAX_PARAMS:
+            raise ValueError(
+                f"EXEC param_count too large: {param_count} > {MAX_PARAMS}"
+            )
         params: List[Param] = []
         for _ in range(param_count):
+            _require(payload, offset + 5, "EXEC param header")
             ptype = ParamType(payload[offset])
             offset += 1
             (plen,) = struct.unpack(">I", payload[offset : offset + 4])
             offset += 4
+            _require(payload, offset + plen, "EXEC param body")
             data = payload[offset : offset + plen]
             offset += plen
             if ptype == ParamType.NULL:
                 params.append(Param(ptype, None))
             elif ptype == ParamType.INT64:
+                if plen != 8:
+                    raise ValueError(f"INT64 param must be 8 bytes, got {plen}")
                 params.append(Param(ptype, struct.unpack(">q", data)[0]))
             elif ptype == ParamType.FLOAT64:
+                if plen != 8:
+                    raise ValueError(f"FLOAT64 param must be 8 bytes, got {plen}")
                 params.append(Param(ptype, struct.unpack(">d", data)[0]))
             elif ptype == ParamType.STRING:
                 params.append(Param(ptype, data.decode("utf-8")))
             elif ptype == ParamType.BOOL:
+                if plen != 1:
+                    raise ValueError(f"BOOL param must be 1 byte, got {plen}")
                 params.append(Param(ptype, bool(data[0])))
             else:
                 raise ValueError(f"unknown param type: {ptype}")
@@ -234,12 +285,15 @@ class ResultHeader:
     @classmethod
     def from_frame(cls, frame: Frame) -> "ResultHeader":
         payload = frame.payload
+        _require(payload, 2, "RESULT_HEADER col_count")
         (count,) = struct.unpack(">H", payload[:2])
         offset = 2
         cols: List[Tuple[str, int]] = []
         for _ in range(count):
+            _require(payload, offset + 2, "RESULT_HEADER column header")
             name_len = payload[offset]
             offset += 1
+            _require(payload, offset + name_len + 1, "RESULT_HEADER column body")
             name = payload[offset : offset + name_len].decode("utf-8")
             offset += name_len
             type_code = payload[offset]
@@ -276,28 +330,39 @@ class ResultRow:
     @classmethod
     def from_frame(cls, frame: Frame) -> "ResultRow":
         payload = frame.payload
+        _require(payload, 2, "RESULT_ROW col_count")
         (count,) = struct.unpack(">H", payload[:2])
         offset = 2
         values: List[Any] = []
         for _ in range(count):
+            _require(payload, offset + 5, "RESULT_ROW value header")
             ptype = ParamType(payload[offset])
             offset += 1
             (plen,) = struct.unpack(">I", payload[offset : offset + 4])
             offset += 4
+            _require(payload, offset + plen, "RESULT_ROW value body")
             data = payload[offset : offset + plen]
             offset += plen
             if ptype == ParamType.NULL:
+                if plen != 0:
+                    raise ValueError(f"NULL param must be 0 bytes, got {plen}")
                 values.append(None)
             elif ptype == ParamType.INT64:
+                if plen != 8:
+                    raise ValueError(f"INT64 value must be 8 bytes, got {plen}")
                 values.append(struct.unpack(">q", data)[0])
             elif ptype == ParamType.FLOAT64:
+                if plen != 8:
+                    raise ValueError(f"FLOAT64 value must be 8 bytes, got {plen}")
                 values.append(struct.unpack(">d", data)[0])
             elif ptype == ParamType.STRING:
                 values.append(data.decode("utf-8"))
             elif ptype == ParamType.BOOL:
+                if plen != 1:
+                    raise ValueError(f"BOOL value must be 1 byte, got {plen}")
                 values.append(bool(data[0]))
             else:
-                values.append(None)
+                raise ValueError(f"unknown param type: {ptype}")
         return cls(values=values)
 
 
@@ -319,6 +384,7 @@ class ResultDone:
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "ResultDone":
+        _require(frame.payload, 17, "RESULT_DONE")
         (rowcount,) = struct.unpack(">q", frame.payload[:8])
         (last_insert_id,) = struct.unpack(">q", frame.payload[8:16])
         status_flags = frame.payload[16]
@@ -344,9 +410,16 @@ class ResultError:
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "ResultError":
-        code = frame.payload[:5].decode("ascii")
-        (msg_len,) = struct.unpack(">H", frame.payload[5:7])
-        msg = frame.payload[7 : 7 + msg_len].decode("utf-8")
+        payload = frame.payload
+        _require(payload, 7, "RESULT_ERROR header")
+        code = payload[:5].decode("ascii")
+        (msg_len,) = struct.unpack(">H", payload[5:7])
+        if msg_len > MAX_ERR_MSG_LEN:
+            raise ValueError(
+                f"RESULT_ERROR msg too long: {msg_len} > {MAX_ERR_MSG_LEN}"
+            )
+        _require(payload, 7 + msg_len, "RESULT_ERROR msg")
+        msg = payload[7 : 7 + msg_len].decode("utf-8")
         return cls(code=code, msg=msg)
 
 
@@ -364,6 +437,7 @@ class Ping:
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "Ping":
+        _require(frame.payload, 8, "PING")
         (ts,) = struct.unpack(">Q", frame.payload)
         return cls(ts=ts)
 
@@ -379,6 +453,7 @@ class Pong:
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "Pong":
+        _require(frame.payload, 8, "PONG")
         (ts,) = struct.unpack(">Q", frame.payload)
         return cls(ts=ts)
 
@@ -436,7 +511,8 @@ _DISPATCH: dict = {
 def decode_message(frame: Frame) -> Any:
     """Decode a frame into the corresponding message dataclass.
 
-    Raises :class:`ValueError` if the type code is unknown.
+    Raises :class:`ValueError` if the type code is unknown or the
+    payload is truncated.
     """
     try:
         cls = _DISPATCH[MessageType(frame.type)]
@@ -463,6 +539,9 @@ __all__ = [
     "Quit",
     "Done",
     "decode_message",
+    "FrameTruncatedError",
     "MAX_PARAMS",
     "MAX_CLIENT_ID",
+    "MAX_SQL_LEN",
+    "MAX_ERR_MSG_LEN",
 ]
