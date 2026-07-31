@@ -1,0 +1,322 @@
+[
+  {
+    "category": "Wire",
+    "name": "HELLO handshake returns server version='tinydb-0.3.0'",
+    "passed": true,
+    "command": "HELLO(client='py-tinydb-0.3.0')",
+    "stdout": "type=0x02 version='tinydb-0.3.0'",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "QUERY 'SELECT n FROM wp_basic' → header+row+done (cols=[('col0', 1)], rowcount=1)",
+    "passed": true,
+    "command": "QUERY(sql='SELECT n FROM wp_basic') (table has 1 row)",
+    "stdout": "hdr=[('col0', 1)] row=[1] done=1",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "QUERY with UTF-8 value returns column + value without Unicode error (got ['你好'])",
+    "passed": true,
+    "command": "QUERY(sql='SELECT s FROM wp_utf8') (value='你好')",
+    "stdout": "columns=[('col0', 3)] row=['你好']",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "empty SQL returns RESULT_ERROR code='42000'",
+    "passed": true,
+    "command": "QUERY(sql='')",
+    "stdout": "code='42000' msg='empty SQL'",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "EXEC with INT64 parameter returns matching row (row.values=['alice'])",
+    "passed": true,
+    "command": "EXEC(sql='SELECT name FROM wp_param WHERE id=?', params=[INT64 1])",
+    "stdout": "row.values=['alice']",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "PRIMARY KEY conflict → RESULT_ERROR code='22000'",
+    "passed": true,
+    "command": "EXEC INSERT id=1 (duplicate)",
+    "stdout": "code='22000' msg=\"UNIQUE constraint violated on 'wp_param'.id: duplicate key 1\"",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "PING round-trips PONG with same timestamp (echoed ts=1785466115679204277)",
+    "passed": true,
+    "command": "PING(ts=<now_ns>)",
+    "stdout": "pong.ts=1785466115679204277",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "QUIT returns OK before closing socket",
+    "passed": true,
+    "command": "QUIT()",
+    "stdout": "type=0x02",
+    "error": ""
+  },
+  {
+    "category": "Wire",
+    "name": "Unknown message TYPE is rejected and connection closed",
+    "passed": true,
+    "command": "send bogus TYPE=0x99 frame, observe close",
+    "stdout": "",
+    "error": ""
+  },
+  {
+    "category": "Server",
+    "name": "tinydb-server binds 127.0.0.1:41419 and accepts TCP",
+    "passed": true,
+    "command": "python -m tinydb.server --db-path /mnt/c/sml/project/py_project/tinydb/scripts/.v3_server.db --port 41419",
+    "stdout": "",
+    "error": ""
+  },
+  {
+    "category": "Server",
+    "name": "SELECT COUNT(*) via server → rows=[[3]] rowcount=1",
+    "passed": true,
+    "command": "Client.execute('SELECT COUNT(*) FROM srv_t')",
+    "stdout": "Result(rows=[[3]], rowcount=1, columns=['col0'], last_insert_id=0)",
+    "error": ""
+  },
+  {
+    "category": "Server",
+    "name": "3 concurrent clients all get [1,2,3] without interference (got [[1, 2, 3], [1, 2, 3], [1, 2, 3]])",
+    "passed": true,
+    "command": "3× Client → SELECT n FROM srv_t",
+    "stdout": "[[1, 2, 3], [1, 2, 3], [1, 2, 3]]",
+    "error": ""
+  },
+  {
+    "category": "Server",
+    "name": "PING RTT on loopback = 0.17ms (< 5ms target)",
+    "passed": true,
+    "command": "client.ping()",
+    "stdout": "0.17ms",
+    "error": ""
+  },
+  {
+    "category": "Server",
+    "name": "max_conns=1 rejects 2nd connection (or closes it after accept)",
+    "passed": true,
+    "command": "spawn server with max_conns=1, attempt 2 connections",
+    "stdout": "got_second=True",
+    "error": ""
+  },
+  {
+    "category": "Server",
+    "name": "bind error on occupied port exits with code=2",
+    "passed": true,
+    "command": "start server on busy port 47271",
+    "stdout": "rc=2 stderr=\"[server] bind error: [Errno 98] error while attempting to bind on address ('127.0.0.1', 47271): [errno 98] address already in use\\n\"",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "Client() performs HELLO and reports version='tinydb-0.3.0'",
+    "passed": true,
+    "command": "Client('127.0.0.1', 8520)",
+    "stdout": "version='tinydb-0.3.0'",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "INSERT returns rowcount=1 last_insert_id=0 rows=[]",
+    "passed": true,
+    "command": "INSERT INTO cli_t VALUES (1, 'alice')",
+    "stdout": "Result(rows=[], rowcount=1, columns=[], last_insert_id=0)",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "SELECT returns columns=['col0', 'col1'] rows=[[1, 'alice']]",
+    "passed": true,
+    "command": "SELECT id, name FROM cli_t WHERE id = 1",
+    "stdout": "Result(rows=[[1, 'alice']], rowcount=1, columns=['col0', 'col1'], last_insert_id=0)",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "execute_many INSERT 10 rows returns total=10",
+    "passed": true,
+    "command": "execute_many(INSERT) × 10 rows",
+    "stdout": "total=10",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "After batch, COUNT(*) returns 11 rows",
+    "passed": true,
+    "command": "SELECT COUNT(*) FROM cli_t",
+    "stdout": "Result(rows=[[11]], rowcount=1, columns=['col0'], last_insert_id=0)",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "transaction commit → row visible ([['tx_commit']])",
+    "passed": true,
+    "command": "with c.transaction(): INSERT ...; then SELECT",
+    "stdout": "Result(rows=[['tx_commit']], rowcount=1, columns=['col0'], last_insert_id=0)",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "transaction rollback → row NOT visible (rowcount=0, rows=[[]])",
+    "passed": true,
+    "command": "with c.transaction(): INSERT; raise → rollback",
+    "stdout": "Result(rows=[[]], rowcount=0, columns=[], last_insert_id=0)",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "client.ping() returns RTT = 0.16ms (< 5ms loopback target)",
+    "passed": true,
+    "command": "c.ping()",
+    "stdout": "0.16ms",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "close() is idempotent (calling twice does not raise)",
+    "passed": true,
+    "command": "c.close(); c.close()",
+    "stdout": "",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "Client() to dead port raises ConnectionError: 'cannot connect to 127.0.0.1:35773: [Errno 111] Connection refused'",
+    "passed": true,
+    "command": "Client('127.0.0.1', 35773)",
+    "stdout": "cannot connect to 127.0.0.1:35773: [Errno 111] Connection refused",
+    "error": ""
+  },
+  {
+    "category": "Client",
+    "name": "AsyncClient: 50 concurrent SELECTs (50 independent connections) succeed (50/50) in 95ms",
+    "passed": true,
+    "command": "asyncio.gather 50× independent AsyncClient.execute('SELECT ...')",
+    "stdout": "ok=50/50 wall=95ms",
+    "error": ""
+  },
+  {
+    "category": "Client-Pool",
+    "name": "Pool(max_size=2) reuses returned connection (id match = True)",
+    "passed": true,
+    "command": "with pool.connection() as c1: ...; with pool.connection() as c2: ...",
+    "stdout": "id1=140496754784592 id2=140496754784592",
+    "error": ""
+  },
+  {
+    "category": "Client-Pool",
+    "name": "3rd acquire with max_size=2 raises TimeoutError (got exhaustion=True)",
+    "passed": true,
+    "command": "pool.acquire(timeout=0.2) when 2 already held",
+    "stdout": "",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--file embedded mode runs CREATE TABLE (rc=0, out='OK\\n')",
+    "passed": true,
+    "command": "python -m tinydb --file X -c 'CREATE TABLE cli_embedded (...)'",
+    "stdout": "rc=0 out='OK\\n'",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--uri with invalid scheme exits code=1 and reports scheme error",
+    "passed": true,
+    "command": "python -m tinydb --uri http://example.com",
+    "stdout": "rc=1 stderr=\"Error: invalid URI 'http://example.com': unsupported URI scheme: 'http'; expected 'tinydb'\\n\"",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--file + --uri together exits code=2 with mutual-exclusion error",
+    "passed": true,
+    "command": "python -m tinydb --file X --uri tinydb://...",
+    "stdout": "rc=2 stderr='usage: tinydb [-h] [--file FILE] [--db DB] [--uri URI] [-c COMMAND]\\n              [--version]\\ntinydb: error: --file and --uri are mutually exclusive\\n'",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--uri tinydb://db.example.com:9527/mydb parses cleanly (rc=1)",
+    "passed": true,
+    "command": "python -m tinydb --uri tinydb://db.example.com:9527/mydb -c 'SELECT ...'",
+    "stdout": "rc=1 stderr='Error: cannot connect to db.example.com:9527: cannot connect to db.example.com:9527: [Errno -5] No address associated with hostname\\n'",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--uri to dead port exits code=1 with connection error message",
+    "passed": true,
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:1 -c 'SELECT ...'",
+    "stdout": "rc=1 stderr='Error: cannot connect to 127.0.0.1:1: cannot connect to 127.0.0.1:1: [Errno 111] Connection refused\\n'",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--uri remote mode SELECT returns table rows (rc=0, contains 'one'/'two'=True)",
+    "passed": true,
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:50485 -c 'SELECT n, label FROM cli_remote ORDER BY n'",
+    "stdout": "rc=0 out='col0 col1\\n1    one \\n2    two \\n'",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--uri remote mode INSERT returns row-affected line (rc=0)",
+    "passed": true,
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:50485 -c 'INSERT INTO cli_remote VALUES (3, 'three')'",
+    "stdout": "rc=0 out='1 row(s)\\n'",
+    "error": ""
+  },
+  {
+    "category": "CLI",
+    "name": "--uri remote SQL syntax error returns rc=1 with ParseError message",
+    "passed": true,
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:50485 -c 'SELECT FROM'",
+    "stdout": "rc=1 out='' err=\"ParseError: expected expression, got KEYWORD 'FROM' (line 1, col 8)\\n\"",
+    "error": ""
+  },
+  {
+    "category": "JDBC",
+    "name": "mvn package builds tinydb-jdbc-0.3.0.jar (rc=0)",
+    "passed": true,
+    "command": "mvn -f jdbc/pom.xml -DskipTests package",
+    "stdout": "ok (silent)",
+    "error": ""
+  },
+  {
+    "category": "JDBC",
+    "name": "tinydb-jdbc-0.3.0.jar exists (45 KB, target <200KB)",
+    "passed": true,
+    "command": "ls -la /mnt/c/sml/project/py_project/tinydb/jdbc/target/tinydb-jdbc-0.3.0.jar",
+    "stdout": "45 KB",
+    "error": ""
+  },
+  {
+    "category": "JDBC",
+    "name": "mvn test passes 174 tests, 0 failures, 0 errors",
+    "passed": true,
+    "command": "mvn -f jdbc/pom.xml test",
+    "stdout": "[m\n[\u001b[1;34mINFO\u001b[m] Loading execution data file /mnt/c/sml/project/py_project/tinydb/jdbc/target/jacoco.exec\n[\u001b[1;34mINFO\u001b[m] Analyzed bundle 'tinydb-jdbc' with 17 classes\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1;32mBUILD SUCCESS\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] Total time:  11.823 s\n[\u001b[1;34mINFO\u001b[m] Finished at: 2026-07-31T10:49:05+08:00\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n\n",
+    "error": ""
+  },
+  {
+    "category": "v0.2-compat",
+    "name": "INNER JOIN via v0.3 still returns 2 rows: [('alice', 100), ('bob', 200)]",
+    "passed": true,
+    "command": "SELECT u.name, o.amount FROM u INNER JOIN o ON u.id = o.uid ORDER BY o.amount",
+    "stdout": "[('alice', 100), ('bob', 200)]",
+    "error": ""
+  }
+]
