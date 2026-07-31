@@ -110,6 +110,27 @@ Spring Boot 2.7.x is the most recent line that still supports Java 8
 — required because `tinydb-jdbc` is compiled for `target=1.8`
 (JDBC 4.2).
 
+### Running the app outside the test runner
+
+The pom pulls in `spring-boot-starter-web` so the app keeps running
+after context startup (no web container = main thread exits and
+the process terminates immediately).  With a `tinydb-server` running
+on port 18520, you can launch from IntelliJ or `mvn spring-boot:run`
+and hit:
+
+```bash
+curl localhost:8080/api/users/health
+# → {"status":"UP","jdbc":"OK","table_count":0}
+
+curl -X POST localhost:8080/api/users \
+     -H 'Content-Type: application/json' \
+     -d '{"id":1,"name":"alice","age":30}'
+# → {"inserted":1,"user":{"id":1,"name":"alice","age":30}}
+
+curl localhost:8080/api/users/1
+# → {"id":1,"name":"alice","age":30}
+```
+
 ### SQL surface used
 
 The v0.3 SQL parser is intentionally strict — see
