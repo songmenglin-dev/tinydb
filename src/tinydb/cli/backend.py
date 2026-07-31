@@ -128,8 +128,11 @@ class RemoteBackend(Backend):
         t0 = _time.perf_counter()
         try:
             result = self._client.execute(sql)
-        except (SyntaxError, GeneralException, DataException) as e:
+        except (SqlSyntaxError, GeneralException, DataException) as e:
             # Translate to TinydbError-style for the CLI.
+            # NOTE: bare ``SyntaxError`` would shadow Python's builtin at
+            # this scope because the import above aliases the wire-protocol
+            # class.  We use the alias explicitly here.
             from tinydb.errors import TinydbError
             raise TinydbError(str(e)) from e
         elapsed = _time.perf_counter() - t0

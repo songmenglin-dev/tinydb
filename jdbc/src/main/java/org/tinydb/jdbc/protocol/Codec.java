@@ -130,12 +130,21 @@ public final class Codec {
 
     public static List<Column> decodeResultHeader(Frame frame) {
         byte[] payload = frame.getPayload();
+        if (payload.length < 2) {
+            throw new IllegalArgumentException("RESULT_HEADER payload too short: " + payload.length);
+        }
         int colCount = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
         List<Column> cols = new ArrayList<>(colCount);
         int off = 2;
         for (int i = 0; i < colCount; i++) {
+            if (off + 2 > payload.length) {
+                throw new IllegalArgumentException("RESULT_HEADER truncated at column " + i);
+            }
             int nameLen = payload[off] & 0xFF;
             off++;
+            if (off + nameLen + 1 > payload.length) {
+                throw new IllegalArgumentException("RESULT_HEADER name overruns payload at column " + i);
+            }
             String name = new String(payload, off, nameLen, StandardCharsets.UTF_8);
             off += nameLen;
             byte type = payload[off];
@@ -147,15 +156,24 @@ public final class Codec {
 
     public static List<Object> decodeResultRow(Frame frame) {
         byte[] payload = frame.getPayload();
+        if (payload.length < 2) {
+            throw new IllegalArgumentException("RESULT_ROW payload too short: " + payload.length);
+        }
         int colCount = ((payload[0] & 0xFF) << 8) | (payload[1] & 0xFF);
         List<Object> values = new ArrayList<>(colCount);
         int off = 2;
         for (int i = 0; i < colCount; i++) {
+            if (off + 5 > payload.length) {
+                throw new IllegalArgumentException("RESULT_ROW truncated at value " + i);
+            }
             byte type = payload[off];
             off++;
             int len = ((payload[off] & 0xFF) << 24) | ((payload[off+1] & 0xFF) << 16) |
                       ((payload[off+2] & 0xFF) << 8) | (payload[off+3] & 0xFF);
             off += 4;
+            if (off + len > payload.length) {
+                throw new IllegalArgumentException("RESULT_ROW value data overruns payload at value " + i);
+            }
             byte[] data = new byte[len];
             System.arraycopy(payload, off, data, 0, len);
             off += len;
@@ -166,6 +184,9 @@ public final class Codec {
 
     public static DoneInfo decodeResultDone(Frame frame) {
         byte[] payload = frame.getPayload();
+        if (payload.length < 17) {
+            throw new IllegalArgumentException("RESULT_DONE payload too short: " + payload.length);
+        }
         long rowcount = readLongBE(payload, 0);
         long lastInsertId = readLongBE(payload, 8);
         byte flags = payload[16];
@@ -173,11 +194,19 @@ public final class Codec {
     }
 
     public static long decodePing(Frame frame) {
-        return readLongBE(frame.getPayload(), 0);
+        byte[] payload = frame.getPayload();
+        if (payload.length < 8) {
+            throw new IllegalArgumentException("PING payload too short: " + payload.length);
+        }
+        return readLongBE(payload, 0);
     }
 
     public static long decodePong(Frame frame) {
-        return readLongBE(frame.getPayload(), 0);
+        byte[] payload = frame.getPayload();
+        if (payload.length < 8) {
+            throw new IllegalArgumentException("PONG payload too short: " + payload.length);
+        }
+        return readLongBE(payload, 0);
     }
 
     // ===== Helpers =====
@@ -194,8 +223,14 @@ public final class Codec {
     }
 
     private static String[] decodeErrorPayloadParts(byte[] payload) {
+        if (payload.length < 7) {
+            throw new IllegalArgumentException("ERR payload too short: " + payload.length);
+        }
         String code = new String(payload, 0, 5, StandardCharsets.UTF_8);
         int msgLen = ((payload[5] & 0xFF) << 8) | (payload[6] & 0xFF);
+        if (7 + msgLen > payload.length) {
+            throw new IllegalArgumentException("ERR msg overruns payload: len=" + msgLen + ", avail=" + (payload.length - 7));
+        }
         String msg = new String(payload, 7, msgLen, StandardCharsets.UTF_8);
         return new String[]{code, msg};
     }

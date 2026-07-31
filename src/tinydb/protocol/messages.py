@@ -78,6 +78,12 @@ class Hello:
 
     @classmethod
     def from_frame(cls, frame: Frame) -> "Hello":
+        # Validate length BEFORE decoding so a malicious peer cannot
+        # force us to allocate a huge string before rejection.
+        if len(frame.payload) > MAX_CLIENT_ID:
+            raise ValueError(
+                f"HELLO client id too long: {len(frame.payload)} > {MAX_CLIENT_ID} bytes"
+            )
         return cls(client=frame.payload.decode("utf-8"))
 
 

@@ -591,11 +591,17 @@ public class TinyDatabaseMetaData implements DatabaseMetaData {
             Object tn = trow.get(0);
             if (tn == null) continue;
             String tableName = tn.toString();
+            // Reject table names that aren't valid SQL identifiers before
+            // splicing them into a DESCRIBE statement.  Even though the
+            // server-side SHOW TABLES is trusted, a future pluggable
+            // server or proxy could return arbitrary strings.
+            if (!isSafeIdentifier(tableName)) continue;
             if (tableNamePattern != null && !matchesLike(tableName, tableNamePattern)) continue;
             try {
                 TinyConnection.QueryResult qr = connection.sendQuery("DESCRIBE " + tableName);
                 for (List<Object> crow : qr.rows) {
                     String colName = crow.get(0) == null ? "" : crow.get(0).toString();
+                    if (!isSafeIdentifier(colName)) continue;
                     if (columnNamePattern != null && !matchesLike(colName, columnNamePattern)) continue;
                     List<Object> out = new ArrayList<>();
                     out.add(connection.getCatalog()); out.add(null);
@@ -609,6 +615,24 @@ public class TinyDatabaseMetaData implements DatabaseMetaData {
             }
         }
         return new TinyResultSet(cols, rows);
+    }
+
+    /** True iff ``s`` is a non-empty identifier made of letters,
+     * digits, or underscores (and not purely digits, which would be a
+     * numeric literal).  Used to keep server-supplied table/column
+     * names out of concatenated SQL.
+     */
+    private static boolean isSafeIdentifier(String s) {
+        if (s == null || s.isEmpty()) return false;
+        boolean allDigits = true;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                      || (c >= '0' && c <= '9') || c == '_';
+            if (!ok) return false;
+            if (allDigits && !(c >= '0' && c <= '9')) allDigits = false;
+        }
+        return !allDigits;
     }
 
     private boolean matchesLike(String s, String pattern) {

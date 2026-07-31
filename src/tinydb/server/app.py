@@ -71,12 +71,26 @@ def _install_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     def _stop() -> None:
         logger.info("shutdown signal received")
         _shutdown_event.set()
-    for sig in (signal.SIGINT, signal.SIGTERM):
+
+    # Module-level wrappers instead of inline lambdas: lambdas create
+    # a new closure each call which (a) prevents signal.signal() from
+    # correctly unregistering a previous handler and (b) can re-enter
+    # mid-handler if the signal fires twice on Windows.
+    def _sigint_handler(*_args) -> None:
+        _stop()
+
+    def _sigterm_handler(*_args) -> None:
+        _stop()
+
+    for sig, handler in (
+        (signal.SIGINT, _sigint_handler),
+        (signal.SIGTERM, _sigterm_handler),
+    ):
         try:
-            loop.add_signal_handler(sig, _stop)
+            loop.add_signal_handler(sig, handler)
         except NotImplementedError:
             # Windows doesn't support add_signal_handler.
-            signal.signal(sig, lambda *_: _stop())
+            signal.signal(sig, handler)
 
 
 def main(argv: Optional[list] = None) -> int:

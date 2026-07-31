@@ -37,12 +37,26 @@ public class TinyPreparedStatement extends TinyStatement implements PreparedStat
     public TinyPreparedStatement(TinyConnection connection, String sql) {
         super(connection);
         this.sql = sql;
+        // Count placeholders, ignoring those inside string literals.
+        // SQL standard escapes a single quote inside a string as ``''``
+        // (two adjacent apostrophes); we must skip both bytes together
+        // so that ``'it''s a ?'`` does not register a phantom parameter.
         int count = 0;
+        boolean inLiteral = false;
         for (int i = 0; i < sql.length(); i++) {
             char c = sql.charAt(i);
+            if (inLiteral) {
+                if (c == '\'') {
+                    if (i + 1 < sql.length() && sql.charAt(i + 1) == '\'') {
+                        i++; // escaped quote: skip the second one
+                    } else {
+                        inLiteral = false;
+                    }
+                }
+                continue;
+            }
             if (c == '\'') {
-                i++;
-                while (i < sql.length() && sql.charAt(i) != '\'') i++;
+                inLiteral = true;
             } else if (c == '?') {
                 count++;
             }
