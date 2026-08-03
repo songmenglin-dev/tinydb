@@ -1,186 +1,155 @@
-# tinydb-server 部署与启动指南
+# tinydb-server 部署指南
 
-> 本文档记录 tinydb（v0.3）嵌入式关系数据库的 **服务端** 安装 / 启动 / 验证 / 停止
-> 流程，所有命令均假定在源码 checkout 的根目录执行。
+> 本文档面向运维与集成开发者，介绍 tinydb 服务端的安装、启动、停止与数据
+> 维护流程。内容与操作系统无关，所有命令假定在源码 clone 的根目录中执行，
+> 文本 `$VAR` 形式的环境变量可在 shell 中提前导出。
 
 ---
 
-## 1. 安装（一次性）
+## 1. 安装
 
 ```bash
 git clone <repo-url> tinydb
 cd tinydb
 
-# core + REPL（引入 prompt_toolkit）
+# 核心运行时 + REPL（依赖 prompt_toolkit）
 pip install -e ".[cli]"
 
-# 跑测试用
+# 同时安装测试依赖
 pip install -e ".[cli,test]"
 
-# 确认
-python -c "import tinydb; print(tinydb.__version__)"    # 应打印当前版本
+# 验证安装
+python -c "import tinydb; print(tinydb.__version__)"
 ```
+
+可发行到 PyPI 二进制包后（roadmap 项），可改用 `pip install tinydb`。
 
 ---
 
 ## 2. 启动服务端
 
-### 2.1 最简单 — 本机回环（单机调试）
+### 2.1 命令格式
+
+```
+python3 -m tinydb.server --db-path <path> [--host HOST] [--port PORT]
+                                                  [--max-conns N]
+                                                  [--heartbeat-interval S]
+```
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `--db-path` | path | 必填 | 数据库文件路径，文件不存在时自动创建 |
+| `--host` | str | `127.0.0.1` | 监听地址 |
+| `--port` | int | `8520` | TCP 端口（1–65535） |
+| `--max-conns` | int | `64` | 最大并发连接数 |
+| `--heartbeat-interval` | float | `30.0` | 心跳间隔（秒）|
+
+### 2.2 本机启动（开发默认）
 
 ```bash
-mkdir -p /tmp/test
-python3 -m tinydb.server --db-path /tmp/test/db --port 8765
+mkdir -p /var/lib/tinydb
+python3 -m tinydb.server --db-path /var/lib/tinydb/data
 ```
 
-启动后看到：
+服务监听 `127.0.0.1:8520`，仅本机访问可用。
 
-```
-[server] 2026-07-31 14:10:11,601 INFO listening on 127.0.0.1:8765
-```
+### 2.3 监听全局（生产 / 跨主机）
 
-### 2.2 跨机器 / WSL2 ← → Windows（推荐生产路径）
-
-`127.0.0.1` 只在同一网络命名空间内可达。WSL2 是个独立的 Hyper-V VM，
-从 Windows 端的 Spring Boot / JDBC client 必须通过 WSL2 的真实 IP 访问：
+将 `--host` 设为 `0.0.0.0` 即可接受来自任意地址的 TCP 连接：
 
 ```bash
-# 先查 WSL2 的 IP
-hostname -I                                # 例：172.29.163.109
-
-# 启动时绑 0.0.0.0，否则只听 loopback
 python3 -m tinydb.server \
-    --db-path /tmp/test/db \
+    --db-path /var/lib/tinydb/data \
     --host 0.0.0.0 \
-    --port 8765
+    --port 8520
 ```
 
-期望输出：
-
-```
-[server] ... INFO listening on 0.0.0.0:8765
-```
-
-可选参数（部分）：
-
-| 参数 | 默认 | 含义 |
-|---|---|---|
-| `--host` | `127.0.0.1` | 监听地址；跨主机访问必填 `0.0.0.0` |
-| `--port` | `8520` | TCP 端口 |
-| `--db-path` | （必填）| 数据文件路径；首次启动自动创建 |
-| `--max-conns` | `64` | 并发连接上限 |
-| `--heartbeat-interval` | `30.0` | 心跳秒数 |
+服务监听 `0.0.0.0:8520`，同一网络内的其它主机可通过本机 IP 访问。
+生产环境建议配合防火墙规则限制可信 IP 段。
 
 ---
 
-## 3. 验证服务连通
+## 3. 停止 / 重启
 
-### 3.1 server 侧 — 看监听端口
-
-```bash
-ss -tlunp | grep 8765
-# 期望：LISTEN 0.0.0.0:8765   ← 表明 socket 真的对所有网卡可达
-```
-
-### 3.2 client 侧 — Python smoke test
-
-另开一个 shell：
+### 3.1 查找进程
 
 ```bash
-PYTHONPATH=src python3 - <<'PY'
-import tinydb
-db = tinydb.connect("127.0.0.1", 8765)
-print(db.execute("SELECT 1"))   # Result(rows=[[1]], rowcount=1)
-print(db.ping())                # 毫秒级回显
-PY
+pgrep -f "tinydb.server"
+# 或
+ss -tlunp 'sport = :8520'
 ```
 
-### 3.3 远端（Windows） — TCP 连通性
-
-```powershell
-Test-NetConnection 172.29.163.109 -Port 8765
-# TcpTestSucceeded: True  ← 通了；False 通常是 WSL2 IP 变了或防火墙拦了
-```
-
-### 3.4 远端（Windows 上的应用）
-
-JDBC URL 直指 WSL2 IP，**不要再写 `localhost`**：
-
-```
-jdbc:tinydb://172.29.163.109:8765/
-```
-
----
-
-## 4. 停止 / 重启
+### 3.2 优雅停止
 
 ```bash
-# 找 pid（任一方式）
-pgrep -f "tinydb.server"         # 命令行匹配
-ss -tlunp 'sport = :8765'        # 看监听 socket 所属进程
-
-# 优雅停止
 kill <pid>                       # 默认 SIGTERM，server 走 graceful shutdown
-
-# 强杀（不推荐，会跳过未刷盘的 commit）
-kill -9 <pid>
 ```
 
-重启流程：
+### 3.3 重启
 
 ```bash
-pkill -f "tinydb.server"                          # 先停
-python3 -m tinydb.server --db-path /tmp/test/db \
-    --host 0.0.0.0 --port 8765                    # 再起
+kill <pid> && \
+python3 -m tinydb.server --db-path /var/lib/tinydb/data --host 0.0.0.0 --port 8520
 ```
 
-> **Tip**：每次 WSL2 重启后 IP 都会变；Spring Boot 那边要么读环境变量、要么写
-> host 路由表，否则要同步更新 JDBC URL 中的 host。
+避免使用 `kill -9`：未刷盘的 commit 可能丢失。
 
 ---
 
-## 5. 数据文件位置 & 备份
+## 4. 数据目录与备份
 
-- `--db-path` 指向的是 **单一 db 文件**（默认 `<path>`）
-- 紧邻处会有一个 **WAL 文件** `<path>.wal`，崩溃恢复依赖它
-- 备份 = 把这两个文件一并拷贝（停服时拷贝最稳）：
+### 4.1 文件结构
+
+启动一次后，`--db-path` 指向的位置会产生两个文件：
+
+```
+<db-path>           # 主数据文件
+<db-path>.wal       # 写前日志（crash recovery 依赖）
+```
+
+### 4.2 在线备份
+
+由于 WAL 持续追加，**在服务运行时直接拷贝** 不保证一致性。建议：
 
 ```bash
-# 停服
-pkill -f "tinydb.server"
+# 1) 停服
+kill <pid>
 
-# 拷贝
-mkdir -p /tmp/test.bak
-cp /tmp/test/db /tmp/test/db.wal /tmp/test.bak/
+# 2) 拷贝
+cp /var/lib/tinydb/data /var/lib/tinydb/data.wal /backup/$(date +%Y%m%d)/
 
-# 恢复（覆盖即可）
-cp /tmp/test.bak/db /tmp/test.bak/db.wal /tmp/test/
+# 3) 恢复
+cp /backup/20260803/data /backup/20260803/data.wal /var/lib/tinydb/
 ```
+
+未来版本将提供 `BACKUP` 在线一致性快照命令。
 
 ---
 
-## 6. 一键脚本（可选）
+## 5. 进程管理脚本
 
-把下面保存为 `scripts/run_server.sh`，`chmod +x` 后就能 `./scripts/run_server.sh start`：
+将以下内容保存为 `scripts/run_server.sh` 并 `chmod +x`：
 
 ```bash
 #!/usr/bin/env bash
-# 启停 tinydb server；适用于 WSL2 与 Linux。
+# tinydb-server 的进程管理封装。
 set -euo pipefail
 
-DB_PATH=${TINYDB_DB_PATH:-/tmp/test/db}
+DB_PATH=${TINYDB_DB_PATH:-/var/lib/tinydb/data}
 HOST=${TINYDB_HOST:-0.0.0.0}
-PORT=${TINYDB_PORT:-8765}
-PIDFILE=${TINYDB_PIDFILE:-/tmp/tinydb.server.pid}
+PORT=${TINYDB_PORT:-8520}
+PIDFILE=${TINYDB_PIDFILE:-/var/run/tinydb.server.pid}
+LOGFILE=${TINYDB_LOGFILE:-/var/log/tinydb/server.log}
 
 case "${1:-start}" in
   start)
     if [[ -f "$PIDFILE" ]] && kill -0 "$(cat $PIDFILE)" 2>/dev/null; then
       echo "already running (pid=$(cat $PIDFILE))"; exit 0
     fi
-    mkdir -p "$(dirname $DB_PATH)"
+    mkdir -p "$(dirname $DB_PATH)" "$(dirname $LOGFILE)"
     nohup python3 -m tinydb.server \
         --db-path "$DB_PATH" --host "$HOST" --port "$PORT" \
-        >/tmp/tinydb.server.log 2>&1 &
+        >>"$LOGFILE" 2>&1 &
     echo $! > "$PIDFILE"
     echo "started pid=$!  db=$DB_PATH  $HOST:$PORT"
     ;;
@@ -190,34 +159,47 @@ case "${1:-start}" in
 esac
 ```
 
----
-
-## 7. 常见故障
-
-| 症状 | 原因 | 修法 |
-|---|---|---|
-| 客户端 `Connection refused` | server 绑了 127.0.0.1，跨主机访问不到 | 加 `--host 0.0.0.0` 启动 |
-| `Test-NetConnection` False | WSL2 重启后 IP 变了 | `hostname -I` 取新 IP，更新 JDBC URL |
-| `port already in use` | 旧进程没干净退出 | `pkill -f "tinydb.server"` 再起 |
-| 重启 server 后 INSERT 报"列数不匹配" | 服务端表是旧 schema，mapper 已更新 | 进 server 同进程跑 `DROP TABLE …`；或加一个 `drop+create` 端点 |
-| Spring Boot 启动后立即退出 | 没有 web 启动器，main 线程无活儿可干 | 加 `org.springframework.boot:spring-boot-starter-web` 依赖 |
-
----
-
-## 8. 与本地集成测试（Spring Boot）联调清单
+使用方式：
 
 ```bash
-# WSL
-./scripts/run_server.sh start            # 或 python3 -m tinydb.server --host 0.0.0.0 ...
-./scripts/run_server.sh status           # 看 0.0.0.0:8765
-
-# Windows
-curl http://localhost:9950/api/users/status
-#   {"status":"UP","table_count":1,"tables":[{"name":"users","row_count":5}]}
+./scripts/run_server.sh start
+./scripts/run_server.sh status
+./scripts/run_server.sh stop
 ```
-
-整套链路 = 浏览器 / curl → Spring Boot (9950) → tinydb-JDBC → WSL2 上的 tinydb-server (8765) → 文件 `/tmp/test/db`。
 
 ---
 
-**版本**：v0.3.0 · **最后更新**：2026-07-31
+## 6. 常见故障
+
+| 症状 | 原因 | 处置 |
+|---|---|---|
+| 客户端 `Connection refused` | 监听绑定 127.0.0.1，跨主机不可达 | 改用 `--host 0.0.0.0` 启动 |
+| INSERT 报"列数不匹配" | 服务端表是旧 schema，与客户端 DDL 不一致 | drop 后重建，或引入 schema migration |
+| `port already in use` | 旧进程未干净退出 | `pkill -f tinydb.server` 后重启 |
+| 客户端无响应 / 频繁超时 | 心跳断开 / `max_conns` 触顶 | 调整 `--heartbeat-interval` 与 `--max-conns` |
+| 进程退出后 commit 丢失 | 上一次使用了 `kill -9` | 改用 `SIGTERM` 让 graceful shutdown 跑完 |
+
+---
+
+## 7. 集成示例（Java / JDBC）
+
+```java
+// application.yml
+spring:
+  datasource:
+    url: ${TINYDB_JDBC_URL:jdbc:tinydb://<server-host>:8520/}
+    driver-class-name: org.tinydb.jdbc.TinyDriver
+    username: ""
+    password: ""
+```
+
+```python
+# Python 客户端
+import tinydb
+db = tinydb.connect("<server-host>", 8520)
+result = db.execute("SELECT * FROM users")
+```
+
+---
+
+**版本**：v0.3.x · **维护**：tinydb 团队
