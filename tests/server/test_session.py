@@ -94,10 +94,9 @@ class TestMockSessionHandshake:
         assert r1[0].type == MessageType.OK
         # Second call: dispatch the Query
         r2 = _run(session.run_once())
-        # Empty result: HEADER + ROW + DONE
+        # Empty result: HEADER + DONE (no row frames for zero-row result)
         assert r2[0].type == MessageType.RESULT_HEADER
-        assert r2[1].type == MessageType.RESULT_ROW
-        assert r2[2].type == MessageType.RESULT_DONE
+        assert r2[1].type == MessageType.RESULT_DONE
 
     def test_session_missing_hello_closes(self):
         sink = io.BytesIO()
@@ -134,13 +133,12 @@ class TestDispatchHandler:
         db.return_rows = []
         msg = Query(sql="SELECT 1, 2")
         frames = _run(dispatch_message(msg, db))
-        # Empty result: HEADER + ROW + DONE
+        # Empty result: HEADER + DONE (no row frames for zero-row result)
         assert len(db.calls) == 1
         assert db.calls[0][0] == "SELECT 1, 2"
         assert db.calls[0][1] is None
         assert frames[0].type == MessageType.RESULT_HEADER
-        assert frames[1].type == MessageType.RESULT_ROW
-        assert frames[2].type == MessageType.RESULT_DONE
+        assert frames[1].type == MessageType.RESULT_DONE
 
     def test_dispatch_exec_substitutes_params(self):
         db = _StubDatabase()

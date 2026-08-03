@@ -28,13 +28,13 @@ import queue
 import threading
 from enum import Enum
 from pathlib import Path
-from typing import Iterator, List, Union
+from typing import Iterator, List, Optional, Union
 
 from tinydb.errors import ParseError, TinydbError
 from tinydb.executor.executor import Executor
-from tinydb.executor.planner import plan as _plan
+from tinydb.executor.planner import UnknownColumnError, plan as _plan
 from tinydb.index.manager import IndexManager
-from tinydb.sql.ast import CreateIndex, CreateTable, DropTable
+from tinydb.sql.ast import CreateIndex, CreateTable, DropTable, Select, Star
 from tinydb.sql.parser import parse
 from tinydb.storage.buffer_pool import BufferPool
 from tinydb.storage.catalog import Catalog
@@ -244,12 +244,16 @@ class Database:
 
     # -- public API ------------------------------------------------------
 
-    def execute(self, sql: str) -> list:
+    def execute(self, sql: str, _stmt=None) -> list:
         """Run a single SQL statement.
 
         SELECT returns rows as ``list[tuple]``.  DML returns a single
         ``[(affected_count,)]`` row.  DDL returns ``[]``.  Raises
         :class:`~tinydb.errors.ParseError` on invalid SQL.
+
+        The hidden ``_stmt`` parameter lets internal callers (e.g.
+        :meth:`execute_with_columns`) skip a re-parse when they have
+        already parsed the SQL for the column-extraction pass.
 
         Thread-safety (v0.2):
 
@@ -266,7 +270,7 @@ class Database:
         committing cannot interleave with a subprocess reader's
         SELECT (REQ-CONC-2 / REQ-CONC-8).
         """
-        stmt = parse(sql)
+        stmt = _stmt if _stmt is not None else parse(sql)
         is_ddl = isinstance(stmt, (CreateTable, DropTable, CreateIndex))
         if is_ddl:
             plan = None
@@ -303,6 +307,67 @@ class Database:
                 with ProcessLock(wal_fp, exclusive=is_write):
                     return self._execute_unlocked(stmt, plan, is_ddl)
             return self._execute_unlocked(stmt, plan, is_ddl)
+
+    def result_columns_for(self, sql: str) -> Optional[List[str]]:
+        """Return the SELECT-projection column names for ``sql``.
+
+        REQ-V03-COLFIX: the v0.3 wire protocol uses these to label the
+        RESULT_HEADER columns so the JDBC driver reports real column
+        names (``id``, ``name``, ``age``) instead of the legacy
+        ``col0``/``col1``/... placeholders.  Mirrors the logic in
+        :class:`tinydb.cli.backend.FileBackend`.
+
+        Returns ``None`` for non-SELECT statements or when the planner
+        can't extract a projection (e.g. parser failure).  The handler
+        treats ``None`` as the signal to fall back to ``col{i}``.
+        """
+        cols = self._result_columns_for_select(sql)
+        return list(cols) if cols is not None else None
+
+    def _result_columns_for_select(self, sql: str) -> Optional[List[str]]:
+        """Internal: parse once, then defer to the shared planner path.
+
+        Used by :meth:`result_columns_for` when the caller has only the
+        SQL string.  :meth:`execute_with_columns` calls
+        :meth:`_projection_columns_for` directly to avoid a second parse.
+        """
+        try:
+            stmt = parse(sql)
+        except ParseError:
+            return None
+        if not isinstance(stmt, Select):
+            return None
+        return self._projection_columns_for(stmt)
+
+    def execute_with_columns(self, sql: str) -> tuple[list, Optional[List[str]]]:
+        """Run ``sql`` and return ``(rows, column_names)`` in one parse.
+
+        REQ-V03-COLFIX: lets the server emit real column names on the
+        wire without paying for a second parse + plan.  Returns
+        ``(rows, None)`` for non-SELECT statements so the handler can
+        use the existing DML/DDL framing.
+        """
+        parsed = None
+        try:
+            parsed = parse(sql)
+        except ParseError:
+            pass  # let execute() surface the parse error
+        columns: Optional[List[str]] = None
+        if isinstance(parsed, Select):
+            # Re-use the already-parsed AST so we don't parse twice.
+            columns = self._projection_columns_for(parsed)
+        rows = self.execute(sql, _stmt=parsed)
+        return rows, columns
+
+    def _projection_columns_for(self, stmt) -> Optional[List[str]]:
+        """Plan ``stmt`` and return projection column names, or None."""
+        from tinydb.executor.ops import result_columns  # local: ops→aggregate cycle
+
+        try:
+            plan = _plan(stmt, self._catalog, indexer=self._indexer)
+            return list(result_columns(plan) or [])  # type: ignore[arg-type]
+        except (KeyError, UnknownColumnError):
+            return None
 
     def _execute_unlocked(self, stmt, plan, is_ddl: bool) -> list:
         """Execute ``stmt`` / ``plan`` assuming both locks are held.

@@ -151,7 +151,13 @@ def _map_error(exc: Exception) -> ResultError:
     return ResultError(code="HY000", msg=str(exc))
 
 
-def _rows_to_frames(rows: list, kind: str, *, guess_columns: bool) -> List[Frame]:
+def _rows_to_frames(
+    rows: list,
+    kind: str,
+    *,
+    guess_columns: bool,
+    column_names: Optional[List[str]] = None,
+) -> List[Frame]:
     """Build the wire response frames for a Database.execute() result.
 
     ``kind`` selects the framing:
@@ -180,17 +186,46 @@ def _rows_to_frames(rows: list, kind: str, *, guess_columns: bool) -> List[Frame
         ]
     # SELECT (or anything else we treat as a row stream).
     if not rows:
+        # No rows means we cannot infer column types from values, so we
+        # cannot honour ``guess_columns``.  Build the header from the
+        # caller-supplied ``column_names`` (string type fallback) when
+        # available so the wire still exposes real column labels to JDBC
+        # clients, otherwise fall back to ``col{i}`` placeholders.  A
+        # zero-row result emits no RESULT_ROW frames — the header alone
+        # tells the client the schema and RESULT_DONE signals EOF.
+        ncols = len(column_names) if column_names is not None else 0
+        if column_names is not None:
+            header_cols = [
+                (name, ParamType.STRING.value) for name in column_names
+            ]
+        else:
+            header_cols = [(f"col{i}", ParamType.STRING.value) for i in range(ncols)]
         return [
-            ResultHeader(columns=[]).to_frame(),
-            ResultRow(values=[]).to_frame(),
+            ResultHeader(columns=header_cols).to_frame(),
             ResultDone(rowcount=0, last_insert_id=0, status_flags=STATUS_FLAGS_OK).to_frame(),
         ]
-    if guess_columns:
-        columns = [
-            (f"col{i}", _guess_type_code(v)) for i, v in enumerate(rows[0])
-        ]
+    ncols = len(rows[0])
+    if column_names is not None and len(column_names) == ncols:
+        if guess_columns:
+            columns = [
+                (name, _guess_type_code(v))
+                for name, v in zip(column_names, rows[0])
+            ]
+        else:
+            columns = [(name, ParamType.STRING.value) for name in column_names]
     else:
-        columns = [(f"col{i}", ParamType.STRING.value) for i in range(len(rows[0]))]
+        # Mismatch (or no names supplied) - fall back to col{i}.  When
+        # ``column_names`` is provided but its length disagrees with
+        # the row width we deliberately do NOT silently use either
+        # source; the placeholder is the safest default for a wire
+        # protocol where mismatched columns would silently corrupt
+        # app-side ResultSet bindings.
+        if guess_columns:
+            columns = [
+                (f"col{i}", _guess_type_code(v)) for i, v in enumerate(rows[0])
+            ]
+        else:
+            columns = [(f"col{i}", ParamType.STRING.value) for i in range(ncols)]
     out: List[Frame] = [ResultHeader(columns=columns).to_frame()]
     for row in rows:
         out.append(ResultRow(values=list(row)).to_frame())
@@ -225,11 +260,29 @@ def _dispatch_sql(sql: str, db, *, guess_columns: bool) -> List[Frame]:
     if not sql or not sql.strip():
         return [ResultError(code="42000", msg="empty SQL").to_frame()]
     kind = _classify(sql)
+    # REQ-V03-COLFIX: the production Database exposes
+    # ``execute_with_columns`` which parses the SQL once and returns
+    # both the rows and the SELECT projection column names.  Stub
+    # databases that predate this surface only ``execute``; the
+    # handler falls back to the legacy ``col{i}`` placeholder for
+    # those (no tests regress).
+    exec_with_cols = getattr(db, "execute_with_columns", None)
     try:
-        rows = db.execute(sql)
+        if exec_with_cols is not None:
+            rows, column_names = exec_with_cols(sql)
+        else:
+            rows = db.execute(sql)
+            column_names = None
+            if kind == "select" and hasattr(db, "result_columns_for"):
+                try:
+                    column_names = db.result_columns_for(sql)
+                except Exception:
+                    column_names = None
     except Exception as e:
         return [_map_error(e).to_frame()]
-    return _rows_to_frames(rows, kind, guess_columns=guess_columns)
+    return _rows_to_frames(
+        rows, kind, guess_columns=guess_columns, column_names=column_names
+    )
 
 
 def dispatch_query(msg: Query, db) -> List[Frame]:
