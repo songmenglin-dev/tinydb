@@ -35,7 +35,7 @@ class TinyDatabaseMetaDataTest {
                             if (hello != null && hello.getType() == org.tinydb.jdbc.protocol.Codec.TYPE_HELLO) {
                                 byte[] ver = "tinydb-0.3.0".getBytes();
                                 org.tinydb.jdbc.protocol.Frame okFrame = new org.tinydb.jdbc.protocol.Frame(
-                                        ver.length + 2,
+                                        ver.length,
                                         org.tinydb.jdbc.protocol.Codec.TYPE_OK,
                                         (byte) 0,
                                         ver);
@@ -71,7 +71,7 @@ class TinyDatabaseMetaDataTest {
                                         payload = baos.toByteArray();
                                     }
                                     org.tinydb.jdbc.protocol.Frame hdr = new org.tinydb.jdbc.protocol.Frame(
-                                            payload.length + 2,
+                                            payload.length,
                                             org.tinydb.jdbc.protocol.Codec.TYPE_RESULT_HEADER,
                                             (byte) 0,
                                             payload);
@@ -86,7 +86,7 @@ class TinyDatabaseMetaDataTest {
                                         dos.write("users".getBytes("UTF-8"));
                                         byte[] rowPayload = baos.toByteArray();
                                         org.tinydb.jdbc.protocol.Frame row = new org.tinydb.jdbc.protocol.Frame(
-                                                rowPayload.length + 2,
+                                                rowPayload.length,
                                                 org.tinydb.jdbc.protocol.Codec.TYPE_RESULT_ROW,
                                                 (byte) 0,
                                                 rowPayload);
@@ -100,7 +100,7 @@ class TinyDatabaseMetaDataTest {
                                     doneDos.writeByte(0);
                                     byte[] donePayload = doneBaos.toByteArray();
                                     org.tinydb.jdbc.protocol.Frame done = new org.tinydb.jdbc.protocol.Frame(
-                                            donePayload.length + 2,
+                                            donePayload.length,
                                             org.tinydb.jdbc.protocol.Codec.TYPE_RESULT_DONE,
                                             (byte) 0,
                                             donePayload);

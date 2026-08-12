@@ -49,10 +49,10 @@
   },
   {
     "category": "Concurrency",
-    "name": "5 readers concurrent (sum≈283ms vs total≈61ms)",
+    "name": "5 readers concurrent (sum≈293ms vs total≈64ms)",
     "passed": true,
     "command": "5× thread: rwlock.read() → SELECT COUNT(*) FROM kv",
-    "stdout": "per-thread ms=[(4, 53), (1, 55), (2, 57), (3, 58), (0, 60)], total=61ms",
+    "stdout": "per-thread ms=[(4, 54), (1, 56), (2, 59), (3, 61), (0, 63)], total=64ms",
     "error": ""
   },
   {

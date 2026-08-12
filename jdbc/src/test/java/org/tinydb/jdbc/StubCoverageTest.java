@@ -45,7 +45,7 @@ class StubCoverageTest {
                             if (hello != null && hello.getType() == org.tinydb.jdbc.protocol.Codec.TYPE_HELLO) {
                                 byte[] ver = "tinydb-0.3.0".getBytes();
                                 org.tinydb.jdbc.protocol.Frame okFrame = new org.tinydb.jdbc.protocol.Frame(
-                                        ver.length + 2,
+                                        ver.length,
                                         org.tinydb.jdbc.protocol.Codec.TYPE_OK,
                                         (byte) 0,
                                         ver);
@@ -65,7 +65,7 @@ class StubCoverageTest {
                                     dos.writeShort(0);
                                     byte[] payload = baos.toByteArray();
                                     org.tinydb.jdbc.protocol.Frame hdr = new org.tinydb.jdbc.protocol.Frame(
-                                            payload.length + 2,
+                                            payload.length,
                                             org.tinydb.jdbc.protocol.Codec.TYPE_RESULT_HEADER,
                                             (byte) 0,
                                             payload);
@@ -78,7 +78,7 @@ class StubCoverageTest {
                                     doneDos.writeByte(0);
                                     byte[] donePayload = doneBaos.toByteArray();
                                     org.tinydb.jdbc.protocol.Frame done = new org.tinydb.jdbc.protocol.Frame(
-                                            donePayload.length + 2,
+                                            donePayload.length,
                                             org.tinydb.jdbc.protocol.Codec.TYPE_RESULT_DONE,
                                             (byte) 0,
                                             donePayload);
@@ -110,14 +110,15 @@ class StubCoverageTest {
     @DisplayName("Connection stubs throw 'not supported'")
     void testConnectionStubs() throws Exception {
         try (java.sql.Connection conn = connect()) {
-            assertThrows(SQLException.class, () -> conn.setReadOnly(true));
-            assertThrows(SQLException.class, conn::isReadOnly);
+            // setReadOnly/isReadOnly intentionally accept (HikariCP/Spring probe on
+            // every checkout); see TinyConnection.setReadOnly for rationale.
             assertThrows(SQLException.class, () -> conn.prepareCall("CALL x()"));
             assertThrows(SQLException.class, () -> conn.prepareCall("CALL x()", 1, 1, 1));
             assertThrows(SQLException.class, () -> conn.setTransactionIsolation(1));
-            assertThrows(SQLException.class, conn::getTransactionIsolation);
-            assertThrows(SQLException.class, conn::getWarnings);
-            assertThrows(SQLException.class, conn::clearWarnings);
+            // getTransactionIsolation intentionally returns TRANSACTION_READ_COMMITTED
+            // (the only level tinydb models); see TinyConnection.getTransactionIsolation.
+            // getWarnings/clearWarnings intentionally return null/no-op — v0.3 never
+            // reports warnings on the wire; see TinyConnection.{get,clear}Warnings.
             assertThrows(SQLException.class, conn::getTypeMap);
             assertThrows(SQLException.class, () -> conn.setTypeMap(new HashMap<String, Class<?>>()));
             assertThrows(SQLException.class, () -> conn.setHoldability(1));
@@ -135,8 +136,8 @@ class StubCoverageTest {
             assertThrows(SQLException.class, () -> conn.createStruct("t", new Object[0]));
             assertThrows(SQLException.class, () -> conn.setSchema("s"));
             assertThrows(SQLException.class, conn::getSchema);
-            assertThrows(SQLException.class, () -> conn.setNetworkTimeout(null, 1));
-            assertThrows(SQLException.class, conn::getNetworkTimeout);
+            // setNetworkTimeout/getNetworkTimeout intentionally accept + echo back
+            // (HikariCP probes both on every checkout); see TinyConnection.
             assertThrows(SQLException.class, () -> conn.abort(null));
         }
     }
@@ -209,7 +210,8 @@ class StubCoverageTest {
         assertThrows(SQLException.class, () -> rs.getArray("x"));
         assertThrows(SQLException.class, () -> rs.getURL(1));
         assertThrows(SQLException.class, () -> rs.getURL("x"));
-        assertThrows(SQLException.class, rs::getType);
+        // getType intentionally returns TYPE_FORWARD_ONLY — the only mode
+        // tinydb supports — rather than throwing.
         assertThrows(SQLException.class, () -> rs.getRef(1));
         assertThrows(SQLException.class, () -> rs.getRef("x"));
         assertThrows(SQLException.class, rs::previous);

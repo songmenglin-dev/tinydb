@@ -45,7 +45,7 @@ class TinyConnectionTest {
                                 // Send OK
                                 byte[] ver = "tinydb-0.3.0".getBytes();
                                 org.tinydb.jdbc.protocol.Frame okFrame = new org.tinydb.jdbc.protocol.Frame(
-                                        ver.length + 2,
+                                        ver.length,
                                         org.tinydb.jdbc.protocol.Codec.TYPE_OK,
                                         (byte) 0,
                                         ver);
@@ -67,7 +67,7 @@ class TinyConnectionTest {
                                         headerDos.writeShort(0); // 0 cols
                                         byte[] headerPayload = headerBaos.toByteArray();
                                         org.tinydb.jdbc.protocol.Frame hdr = new org.tinydb.jdbc.protocol.Frame(
-                                                headerPayload.length + 2,
+                                                headerPayload.length,
                                                 org.tinydb.jdbc.protocol.Codec.TYPE_RESULT_HEADER,
                                                 (byte) 0,
                                                 headerPayload);
@@ -80,7 +80,7 @@ class TinyConnectionTest {
                                         doneDos.writeByte(0);
                                         byte[] donePayload = doneBaos.toByteArray();
                                         org.tinydb.jdbc.protocol.Frame done = new org.tinydb.jdbc.protocol.Frame(
-                                                donePayload.length + 2,
+                                                donePayload.length,
                                                 org.tinydb.jdbc.protocol.Codec.TYPE_RESULT_DONE,
                                                 (byte) 0,
                                                 donePayload);

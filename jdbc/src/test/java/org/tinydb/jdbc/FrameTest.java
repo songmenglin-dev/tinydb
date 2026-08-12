@@ -49,12 +49,12 @@ class FrameTest {
         frame.write(dos);
 
         byte[] bytes = baos.toByteArray();
-        // LEN=0x00000002 (big-endian), TYPE=0x10, FLAGS=0x00
+        // LEN=0x00000000 (big-endian), TYPE=0x10, FLAGS=0x00
         assertEquals(6, bytes.length);
         assertEquals((byte) 0x00, bytes[0]);
         assertEquals((byte) 0x00, bytes[1]);
         assertEquals((byte) 0x00, bytes[2]);
-        assertEquals((byte) 0x02, bytes[3]);
+        assertEquals((byte) 0x00, bytes[3]);
         assertEquals((byte) 0x10, bytes[4]);
         assertEquals((byte) 0x00, bytes[5]);
     }

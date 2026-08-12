@@ -9,10 +9,10 @@
   },
   {
     "category": "Wire",
-    "name": "QUERY 'SELECT n FROM wp_basic' → header+row+done (cols=[('col0', 1)], rowcount=1)",
+    "name": "QUERY 'SELECT n FROM wp_basic' → header+row+done (cols=[('n', 1)], rowcount=1)",
     "passed": true,
     "command": "QUERY(sql='SELECT n FROM wp_basic') (table has 1 row)",
-    "stdout": "hdr=[('col0', 1)] row=[1] done=1",
+    "stdout": "hdr=[('n', 1)] row=[1] done=1",
     "error": ""
   },
   {
@@ -20,7 +20,7 @@
     "name": "QUERY with UTF-8 value returns column + value without Unicode error (got ['你好'])",
     "passed": true,
     "command": "QUERY(sql='SELECT s FROM wp_utf8') (value='你好')",
-    "stdout": "columns=[('col0', 3)] row=['你好']",
+    "stdout": "columns=[('s', 3)] row=['你好']",
     "error": ""
   },
   {
@@ -49,10 +49,10 @@
   },
   {
     "category": "Wire",
-    "name": "PING round-trips PONG with same timestamp (echoed ts=1785466115679204277)",
+    "name": "PING round-trips PONG with same timestamp (echoed ts=1786520503194245785)",
     "passed": true,
     "command": "PING(ts=<now_ns>)",
-    "stdout": "pong.ts=1785466115679204277",
+    "stdout": "pong.ts=1786520503194245785",
     "error": ""
   },
   {
@@ -73,9 +73,9 @@
   },
   {
     "category": "Server",
-    "name": "tinydb-server binds 127.0.0.1:41419 and accepts TCP",
+    "name": "tinydb-server binds 127.0.0.1:47041 and accepts TCP",
     "passed": true,
-    "command": "python -m tinydb.server --db-path /mnt/c/sml/project/py_project/tinydb/scripts/.v3_server.db --port 41419",
+    "command": "python -m tinydb.server --db-path /mnt/c/sml/project/py_project/tinydb/scripts/.v3_server.db --port 47041",
     "stdout": "",
     "error": ""
   },
@@ -84,7 +84,7 @@
     "name": "SELECT COUNT(*) via server → rows=[[3]] rowcount=1",
     "passed": true,
     "command": "Client.execute('SELECT COUNT(*) FROM srv_t')",
-    "stdout": "Result(rows=[[3]], rowcount=1, columns=['col0'], last_insert_id=0)",
+    "stdout": "Result(rows=[[3]], rowcount=1, columns=['COUNT(*)'], last_insert_id=0)",
     "error": ""
   },
   {
@@ -115,8 +115,8 @@
     "category": "Server",
     "name": "bind error on occupied port exits with code=2",
     "passed": true,
-    "command": "start server on busy port 47271",
-    "stdout": "rc=2 stderr=\"[server] bind error: [Errno 98] error while attempting to bind on address ('127.0.0.1', 47271): [errno 98] address already in use\\n\"",
+    "command": "start server on busy port 60205",
+    "stdout": "rc=2 stderr=\"[server] bind error: [Errno 98] error while attempting to bind on address ('127.0.0.1', 60205): [errno 98] address already in use\\n\"",
     "error": ""
   },
   {
@@ -137,10 +137,10 @@
   },
   {
     "category": "Client",
-    "name": "SELECT returns columns=['col0', 'col1'] rows=[[1, 'alice']]",
+    "name": "SELECT returns columns=['id', 'name'] rows=[[1, 'alice']]",
     "passed": true,
     "command": "SELECT id, name FROM cli_t WHERE id = 1",
-    "stdout": "Result(rows=[[1, 'alice']], rowcount=1, columns=['col0', 'col1'], last_insert_id=0)",
+    "stdout": "Result(rows=[[1, 'alice']], rowcount=1, columns=['id', 'name'], last_insert_id=0)",
     "error": ""
   },
   {
@@ -156,7 +156,7 @@
     "name": "After batch, COUNT(*) returns 11 rows",
     "passed": true,
     "command": "SELECT COUNT(*) FROM cli_t",
-    "stdout": "Result(rows=[[11]], rowcount=1, columns=['col0'], last_insert_id=0)",
+    "stdout": "Result(rows=[[11]], rowcount=1, columns=['COUNT(*)'], last_insert_id=0)",
     "error": ""
   },
   {
@@ -164,23 +164,23 @@
     "name": "transaction commit → row visible ([['tx_commit']])",
     "passed": true,
     "command": "with c.transaction(): INSERT ...; then SELECT",
-    "stdout": "Result(rows=[['tx_commit']], rowcount=1, columns=['col0'], last_insert_id=0)",
+    "stdout": "Result(rows=[['tx_commit']], rowcount=1, columns=['name'], last_insert_id=0)",
     "error": ""
   },
   {
     "category": "Client",
-    "name": "transaction rollback → row NOT visible (rowcount=0, rows=[[]])",
+    "name": "transaction rollback → row NOT visible (rowcount=0, rows=[])",
     "passed": true,
     "command": "with c.transaction(): INSERT; raise → rollback",
-    "stdout": "Result(rows=[[]], rowcount=0, columns=[], last_insert_id=0)",
+    "stdout": "Result(rows=[], rowcount=0, columns=['name'], last_insert_id=0)",
     "error": ""
   },
   {
     "category": "Client",
-    "name": "client.ping() returns RTT = 0.16ms (< 5ms loopback target)",
+    "name": "client.ping() returns RTT = 0.20ms (< 5ms loopback target)",
     "passed": true,
     "command": "c.ping()",
-    "stdout": "0.16ms",
+    "stdout": "0.20ms",
     "error": ""
   },
   {
@@ -193,18 +193,18 @@
   },
   {
     "category": "Client",
-    "name": "Client() to dead port raises ConnectionError: 'cannot connect to 127.0.0.1:35773: [Errno 111] Connection refused'",
+    "name": "Client() to dead port raises ConnectionError: 'cannot connect to 127.0.0.1:59259: [Errno 111] Connection refused'",
     "passed": true,
-    "command": "Client('127.0.0.1', 35773)",
-    "stdout": "cannot connect to 127.0.0.1:35773: [Errno 111] Connection refused",
+    "command": "Client('127.0.0.1', 59259)",
+    "stdout": "cannot connect to 127.0.0.1:59259: [Errno 111] Connection refused",
     "error": ""
   },
   {
     "category": "Client",
-    "name": "AsyncClient: 50 concurrent SELECTs (50 independent connections) succeed (50/50) in 95ms",
+    "name": "AsyncClient: 50 concurrent SELECTs (50 independent connections) succeed (50/50) in 118ms",
     "passed": true,
     "command": "asyncio.gather 50× independent AsyncClient.execute('SELECT ...')",
-    "stdout": "ok=50/50 wall=95ms",
+    "stdout": "ok=50/50 wall=118ms",
     "error": ""
   },
   {
@@ -212,7 +212,7 @@
     "name": "Pool(max_size=2) reuses returned connection (id match = True)",
     "passed": true,
     "command": "with pool.connection() as c1: ...; with pool.connection() as c2: ...",
-    "stdout": "id1=140496754784592 id2=140496754784592",
+    "stdout": "id1=139762332596560 id2=139762332596560",
     "error": ""
   },
   {
@@ -267,15 +267,15 @@
     "category": "CLI",
     "name": "--uri remote mode SELECT returns table rows (rc=0, contains 'one'/'two'=True)",
     "passed": true,
-    "command": "python -m tinydb --uri tinydb://127.0.0.1:50485 -c 'SELECT n, label FROM cli_remote ORDER BY n'",
-    "stdout": "rc=0 out='col0 col1\\n1    one \\n2    two \\n'",
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:45653 -c 'SELECT n, label FROM cli_remote ORDER BY n'",
+    "stdout": "rc=0 out='n label\\n1 one  \\n2 two  \\n'",
     "error": ""
   },
   {
     "category": "CLI",
     "name": "--uri remote mode INSERT returns row-affected line (rc=0)",
     "passed": true,
-    "command": "python -m tinydb --uri tinydb://127.0.0.1:50485 -c 'INSERT INTO cli_remote VALUES (3, 'three')'",
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:45653 -c 'INSERT INTO cli_remote VALUES (3, 'three')'",
     "stdout": "rc=0 out='1 row(s)\\n'",
     "error": ""
   },
@@ -283,7 +283,7 @@
     "category": "CLI",
     "name": "--uri remote SQL syntax error returns rc=1 with ParseError message",
     "passed": true,
-    "command": "python -m tinydb --uri tinydb://127.0.0.1:50485 -c 'SELECT FROM'",
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:45653 -c 'SELECT FROM'",
     "stdout": "rc=1 out='' err=\"ParseError: expected expression, got KEYWORD 'FROM' (line 1, col 8)\\n\"",
     "error": ""
   },
@@ -308,7 +308,7 @@
     "name": "mvn test passes 174 tests, 0 failures, 0 errors",
     "passed": true,
     "command": "mvn -f jdbc/pom.xml test",
-    "stdout": "[m\n[\u001b[1;34mINFO\u001b[m] Loading execution data file /mnt/c/sml/project/py_project/tinydb/jdbc/target/jacoco.exec\n[\u001b[1;34mINFO\u001b[m] Analyzed bundle 'tinydb-jdbc' with 17 classes\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1;32mBUILD SUCCESS\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] Total time:  11.823 s\n[\u001b[1;34mINFO\u001b[m] Finished at: 2026-07-31T10:49:05+08:00\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n\n",
+    "stdout": "\u001b[m\n[\u001b[1;34mINFO\u001b[m] Loading execution data file /mnt/c/sml/project/py_project/tinydb/jdbc/target/jacoco.exec\n[\u001b[1;34mINFO\u001b[m] Analyzed bundle 'tinydb-jdbc' with 17 classes\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1;32mBUILD SUCCESS\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] Total time:  7.698 s\n[\u001b[1;34mINFO\u001b[m] Finished at: 2026-08-12T15:42:05+08:00\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n\n",
     "error": ""
   },
   {
