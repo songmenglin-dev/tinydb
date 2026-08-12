@@ -77,21 +77,15 @@ The driver JAR is referenced from the parent project via a Maven
 `jdbc/target/tinydb-jdbc-0.3.0.jar`. There's no need to publish the
 driver to a Maven repo just to consume it.
 
-### Column-name quirk (v0.3 SELECT placeholder columns)
+### Column-name resolution (v0.3-COLFIX)
 
-`tinydb` v0.3 returns placeholder column names (`col0`, `col1`,
-`col2`, …) for SELECT lists — there's no `AS` alias support yet (see
-`docs/v0.3功能测试报告.md` §十二 "Known Spec Gap"). MyBatis maps
-result columns to bean properties by name, so `UserMapper.findById`
-carries an explicit `@Results` block that lines `col0/col1/col2` up
-with `User.id / name / age`:
+Since v0.3-COLFIX the server returns the real projection column names
+for SELECT lists — e.g. `SELECT id, name, age FROM users` reports
+`id`, `name`, `age` on the wire. MyBatis maps result columns to
+bean properties by name, so `UserMapper.findById` no longer needs an
+explicit `@Results` block:
 
 ```java
-@Results({
-    @Result(column = "col0", property = "id"),
-    @Result(column = "col1", property = "name"),
-    @Result(column = "col2", property = "age"),
-})
 @Select("SELECT id, name, age FROM users WHERE id = #{id}")
 User findById(@Param("id") Integer id);
 ```

@@ -130,7 +130,7 @@ class TestClientExecute:
                 result = c.execute("SELECT id, name FROM t ORDER BY id")
                 assert result.rowcount == 2
                 assert result.rows == [[1, "a"], [2, "b"]]
-                assert result.columns == ["col0", "col1"]
+                assert result.columns == ["id", "name"]
             finally:
                 c.close()
         finally:
@@ -159,7 +159,7 @@ class TestClientSqlPath:
                 result = c.execute("SELECT id, name FROM t ORDER BY id")
                 assert result.rowcount == 2
                 assert result.rows == [[1, "a"], [2, "b"]]
-                assert result.columns == ["col0", "col1"]
+                assert result.columns == ["id", "name"]
             finally:
                 c.close()
         finally:

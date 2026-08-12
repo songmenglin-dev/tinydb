@@ -5,8 +5,6 @@ import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
-import org.apache.ibatis.annotations.Result;
-import org.apache.ibatis.annotations.Results;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
@@ -18,10 +16,11 @@ import java.util.List;
  * ({@code jdbc:tinydb://...}) and round-trips to a running
  * {@code tinydb-server} process.
  *
- * <p>The v0.3 driver returns placeholder column names
- * ({@code col0}, {@code col1}, …) for SELECT lists, so each read
- * query carries an explicit {@link Results} mapping that lines
- * {@code col0..col2} up with the {@link User} bean properties.
+ * <p>Since v0.3-COLFIX the server returns the projected column names
+ * from the SELECT list (e.g. {@code id}, {@code name}, {@code age}
+ * for {@code SELECT id, name, age FROM users}), so MyBatis can map
+ * the result columns to the {@link User} bean properties by name
+ * without an explicit {@link Results} bridge.
  */
 @Mapper
 public interface UserMapper {
@@ -41,11 +40,6 @@ public interface UserMapper {
     @Insert("INSERT INTO users VALUES (#{id}, #{name}, #{age})")
     int insert(User user);
 
-    @Results({
-            @Result(column = "col0", property = "id"),
-            @Result(column = "col1", property = "name"),
-            @Result(column = "col2", property = "age"),
-    })
     @Select("SELECT id, name, age FROM users ORDER BY id")
     List<User> findAll();
 
