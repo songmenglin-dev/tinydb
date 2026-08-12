@@ -6,13 +6,13 @@
 
     <groupId>com.example</groupId>
     <artifactId>tinydb-jdbc-springboot-test</artifactId>
-    <version>0.3.0</version>
+    <version>0.3.1</version>
     <packaging>jar</packaging>
 
     <name>tinydb-jdbc-springboot-test</name>
     <description>
         Spring Boot + MyBatis integration test that drives the local
-        tinydb-jdbc-0.3.0.jar driver against a running tinydb-server
+        tinydb-jdbc-0.3.1.jar driver against a running tinydb-server
         to verify end-to-end JDBC connectivity.
     </description>
 
@@ -58,14 +58,14 @@
         </dependency>
 
         <!-- The locally-built tinydb-jdbc driver.  Resolved via systemPath
-             so the test always picks up the current tinydb-jdbc-0.3.0.jar
+             so the test always picks up the current tinydb-jdbc-0.3.1.jar
              without needing to publish it to a Maven repo. -->
         <dependency>
             <groupId>org.tinydb</groupId>
             <artifactId>tinydb-jdbc</artifactId>
-            <version>0.3.0</version>
+            <version>0.3.1</version>
             <scope>system</scope>
-            <systemPath>${project.basedir}/../../../jdbc/target/tinydb-jdbc-0.3.0.jar</systemPath>
+            <systemPath>${project.basedir}/../../../jdbc/target/tinydb-jdbc-0.3.1.jar</systemPath>
         </dependency>
 
         <!-- Test scope -->

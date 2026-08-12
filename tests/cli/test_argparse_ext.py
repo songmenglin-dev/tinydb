@@ -36,7 +36,7 @@ def test_main_version_prints_version_and_returns_zero(tmp_path: Path) -> None:
         with pytest.raises(SystemExit) as exc:
             cli_main(["--version"])
     assert exc.value.code == 0
-    assert "0.1" in buf.getvalue()
+    assert "0.3.1" in buf.getvalue()
 
 
 def test_main_version_with_db_still_works(tmp_path: Path) -> None:
@@ -45,7 +45,7 @@ def test_main_version_with_db_still_works(tmp_path: Path) -> None:
     with redirect_stdout(buf):
         rc = cli_main(["--db", str(tmp_path / "x.db"), "--version"])
     assert rc == 0
-    assert "0.1" in buf.getvalue()
+    assert "0.3.1" in buf.getvalue()
 
 
 def test_main_runs_one_sql_and_prints_rows(tmp_path: Path) -> None:

@@ -1,10 +1,10 @@
 [
   {
     "category": "Wire",
-    "name": "HELLO handshake returns server version='tinydb-0.3.0'",
+    "name": "HELLO handshake returns server version='tinydb-0.3.1'",
     "passed": true,
-    "command": "HELLO(client='py-tinydb-0.3.0')",
-    "stdout": "type=0x02 version='tinydb-0.3.0'",
+    "command": "HELLO(client='py-tinydb-0.3.1')",
+    "stdout": "type=0x02 version='tinydb-0.3.1'",
     "error": ""
   },
   {
@@ -49,10 +49,10 @@
   },
   {
     "category": "Wire",
-    "name": "PING round-trips PONG with same timestamp (echoed ts=1786520503194245785)",
+    "name": "PING round-trips PONG with same timestamp (echoed ts=1786522323394770484)",
     "passed": true,
     "command": "PING(ts=<now_ns>)",
-    "stdout": "pong.ts=1786520503194245785",
+    "stdout": "pong.ts=1786522323394770484",
     "error": ""
   },
   {
@@ -73,9 +73,9 @@
   },
   {
     "category": "Server",
-    "name": "tinydb-server binds 127.0.0.1:47041 and accepts TCP",
+    "name": "tinydb-server binds 127.0.0.1:42749 and accepts TCP",
     "passed": true,
-    "command": "python -m tinydb.server --db-path /mnt/c/sml/project/py_project/tinydb/scripts/.v3_server.db --port 47041",
+    "command": "python -m tinydb.server --db-path /mnt/c/sml/project/py_project/tinydb/scripts/.v3_server.db --port 42749",
     "stdout": "",
     "error": ""
   },
@@ -97,10 +97,10 @@
   },
   {
     "category": "Server",
-    "name": "PING RTT on loopback = 0.17ms (< 5ms target)",
+    "name": "PING RTT on loopback = 0.22ms (< 5ms target)",
     "passed": true,
     "command": "client.ping()",
-    "stdout": "0.17ms",
+    "stdout": "0.22ms",
     "error": ""
   },
   {
@@ -115,16 +115,16 @@
     "category": "Server",
     "name": "bind error on occupied port exits with code=2",
     "passed": true,
-    "command": "start server on busy port 60205",
-    "stdout": "rc=2 stderr=\"[server] bind error: [Errno 98] error while attempting to bind on address ('127.0.0.1', 60205): [errno 98] address already in use\\n\"",
+    "command": "start server on busy port 42345",
+    "stdout": "rc=2 stderr=\"[server] bind error: [Errno 98] error while attempting to bind on address ('127.0.0.1', 42345): [errno 98] address already in use\\n\"",
     "error": ""
   },
   {
     "category": "Client",
-    "name": "Client() performs HELLO and reports version='tinydb-0.3.0'",
+    "name": "Client() performs HELLO and reports version='tinydb-0.3.1'",
     "passed": true,
     "command": "Client('127.0.0.1', 8520)",
-    "stdout": "version='tinydb-0.3.0'",
+    "stdout": "version='tinydb-0.3.1'",
     "error": ""
   },
   {
@@ -177,10 +177,10 @@
   },
   {
     "category": "Client",
-    "name": "client.ping() returns RTT = 0.20ms (< 5ms loopback target)",
+    "name": "client.ping() returns RTT = 0.22ms (< 5ms loopback target)",
     "passed": true,
     "command": "c.ping()",
-    "stdout": "0.20ms",
+    "stdout": "0.22ms",
     "error": ""
   },
   {
@@ -193,18 +193,18 @@
   },
   {
     "category": "Client",
-    "name": "Client() to dead port raises ConnectionError: 'cannot connect to 127.0.0.1:59259: [Errno 111] Connection refused'",
+    "name": "Client() to dead port raises ConnectionError: 'cannot connect to 127.0.0.1:40531: [Errno 111] Connection refused'",
     "passed": true,
-    "command": "Client('127.0.0.1', 59259)",
-    "stdout": "cannot connect to 127.0.0.1:59259: [Errno 111] Connection refused",
+    "command": "Client('127.0.0.1', 40531)",
+    "stdout": "cannot connect to 127.0.0.1:40531: [Errno 111] Connection refused",
     "error": ""
   },
   {
     "category": "Client",
-    "name": "AsyncClient: 50 concurrent SELECTs (50 independent connections) succeed (50/50) in 118ms",
+    "name": "AsyncClient: 50 concurrent SELECTs (50 independent connections) succeed (50/50) in 111ms",
     "passed": true,
     "command": "asyncio.gather 50× independent AsyncClient.execute('SELECT ...')",
-    "stdout": "ok=50/50 wall=118ms",
+    "stdout": "ok=50/50 wall=111ms",
     "error": ""
   },
   {
@@ -212,7 +212,7 @@
     "name": "Pool(max_size=2) reuses returned connection (id match = True)",
     "passed": true,
     "command": "with pool.connection() as c1: ...; with pool.connection() as c2: ...",
-    "stdout": "id1=139762332596560 id2=139762332596560",
+    "stdout": "id1=140545459370320 id2=140545459370320",
     "error": ""
   },
   {
@@ -267,7 +267,7 @@
     "category": "CLI",
     "name": "--uri remote mode SELECT returns table rows (rc=0, contains 'one'/'two'=True)",
     "passed": true,
-    "command": "python -m tinydb --uri tinydb://127.0.0.1:45653 -c 'SELECT n, label FROM cli_remote ORDER BY n'",
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:37949 -c 'SELECT n, label FROM cli_remote ORDER BY n'",
     "stdout": "rc=0 out='n label\\n1 one  \\n2 two  \\n'",
     "error": ""
   },
@@ -275,7 +275,7 @@
     "category": "CLI",
     "name": "--uri remote mode INSERT returns row-affected line (rc=0)",
     "passed": true,
-    "command": "python -m tinydb --uri tinydb://127.0.0.1:45653 -c 'INSERT INTO cli_remote VALUES (3, 'three')'",
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:37949 -c 'INSERT INTO cli_remote VALUES (3, 'three')'",
     "stdout": "rc=0 out='1 row(s)\\n'",
     "error": ""
   },
@@ -283,13 +283,13 @@
     "category": "CLI",
     "name": "--uri remote SQL syntax error returns rc=1 with ParseError message",
     "passed": true,
-    "command": "python -m tinydb --uri tinydb://127.0.0.1:45653 -c 'SELECT FROM'",
+    "command": "python -m tinydb --uri tinydb://127.0.0.1:37949 -c 'SELECT FROM'",
     "stdout": "rc=1 out='' err=\"ParseError: expected expression, got KEYWORD 'FROM' (line 1, col 8)\\n\"",
     "error": ""
   },
   {
     "category": "JDBC",
-    "name": "mvn package builds tinydb-jdbc-0.3.0.jar (rc=0)",
+    "name": "mvn package builds tinydb-jdbc-0.3.1.jar (rc=0)",
     "passed": true,
     "command": "mvn -f jdbc/pom.xml -DskipTests package",
     "stdout": "ok (silent)",
@@ -297,9 +297,9 @@
   },
   {
     "category": "JDBC",
-    "name": "tinydb-jdbc-0.3.0.jar exists (45 KB, target <200KB)",
+    "name": "tinydb-jdbc-0.3.1.jar exists (45 KB, target <200KB)",
     "passed": true,
-    "command": "ls -la /mnt/c/sml/project/py_project/tinydb/jdbc/target/tinydb-jdbc-0.3.0.jar",
+    "command": "ls -la /mnt/c/sml/project/py_project/tinydb/jdbc/target/tinydb-jdbc-0.3.1.jar",
     "stdout": "45 KB",
     "error": ""
   },
@@ -308,7 +308,7 @@
     "name": "mvn test passes 174 tests, 0 failures, 0 errors",
     "passed": true,
     "command": "mvn -f jdbc/pom.xml test",
-    "stdout": "\u001b[m\n[\u001b[1;34mINFO\u001b[m] Loading execution data file /mnt/c/sml/project/py_project/tinydb/jdbc/target/jacoco.exec\n[\u001b[1;34mINFO\u001b[m] Analyzed bundle 'tinydb-jdbc' with 17 classes\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1;32mBUILD SUCCESS\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] Total time:  7.698 s\n[\u001b[1;34mINFO\u001b[m] Finished at: 2026-08-12T15:42:05+08:00\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n\n",
+    "stdout": "\u001b[m\n[\u001b[1;34mINFO\u001b[m] Loading execution data file /mnt/c/sml/project/py_project/tinydb/jdbc/target/jacoco.exec\n[\u001b[1;34mINFO\u001b[m] Analyzed bundle 'tinydb-jdbc' with 17 classes\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1;32mBUILD SUCCESS\u001b[m\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n[\u001b[1;34mINFO\u001b[m] Total time:  7.681 s\n[\u001b[1;34mINFO\u001b[m] Finished at: 2026-08-12T16:12:25+08:00\n[\u001b[1;34mINFO\u001b[m] \u001b[1m------------------------------------------------------------------------\u001b[m\n\n",
     "error": ""
   },
   {

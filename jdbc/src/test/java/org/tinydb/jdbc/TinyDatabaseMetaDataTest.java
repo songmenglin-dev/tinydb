@@ -33,7 +33,7 @@ class TinyDatabaseMetaDataTest {
                             java.io.DataOutputStream out = new java.io.DataOutputStream(client.getOutputStream());
                             org.tinydb.jdbc.protocol.Frame hello = org.tinydb.jdbc.protocol.Frame.read(in);
                             if (hello != null && hello.getType() == org.tinydb.jdbc.protocol.Codec.TYPE_HELLO) {
-                                byte[] ver = "tinydb-0.3.0".getBytes();
+                                byte[] ver = "tinydb-0.3.1".getBytes();
                                 org.tinydb.jdbc.protocol.Frame okFrame = new org.tinydb.jdbc.protocol.Frame(
                                         ver.length,
                                         org.tinydb.jdbc.protocol.Codec.TYPE_OK,
@@ -174,7 +174,7 @@ class TinyDatabaseMetaDataTest {
             int port = ss.getLocalPort();
             try (java.sql.Connection conn = java.sql.DriverManager.getConnection(
                     "jdbc:tinydb://127.0.0.1:" + port + "/testdb")) {
-                assertEquals("tinydb-0.3.0", conn.getMetaData().getDatabaseProductVersion());
+                assertEquals("tinydb-0.3.1", conn.getMetaData().getDatabaseProductVersion());
             }
         } finally {
             ss.close();
@@ -190,7 +190,7 @@ class TinyDatabaseMetaDataTest {
             try (java.sql.Connection conn = java.sql.DriverManager.getConnection(
                     "jdbc:tinydb://127.0.0.1:" + port + "/testdb")) {
                 assertEquals("tinydb-jdbc", conn.getMetaData().getDriverName());
-                assertEquals("0.3.0", conn.getMetaData().getDriverVersion());
+                assertEquals("0.3.1", conn.getMetaData().getDriverVersion());
             }
         } finally {
             ss.close();

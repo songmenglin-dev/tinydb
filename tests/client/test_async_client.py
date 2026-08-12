@@ -77,7 +77,7 @@ class TestAsyncConnect:
                 c = AsyncClient("127.0.0.1", port)
                 await c.connect()
                 try:
-                    assert c.version == "tinydb-0.3.0"
+                    assert c.version == "tinydb-0.3.1"
                 finally:
                     await c.close()
             _run(_go())

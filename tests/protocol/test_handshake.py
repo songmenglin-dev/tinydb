@@ -18,10 +18,10 @@ class TestHandshakeConstants:
     """Protocol-wide constants used by the handshake."""
 
     def test_default_client_id(self):
-        assert DEFAULT_CLIENT_ID == "py-tinydb-0.3.0"
+        assert DEFAULT_CLIENT_ID == "py-tinydb-0.3.1"
 
     def test_default_server_version(self):
-        assert DEFAULT_SERVER_VERSION == "tinydb-0.3.0"
+        assert DEFAULT_SERVER_VERSION == "tinydb-0.3.1"
 
     def test_client_id_constant(self):
         assert CLIENT_ID == DEFAULT_CLIENT_ID

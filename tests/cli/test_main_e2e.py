@@ -88,5 +88,5 @@ def test_version_exits_zero() -> None:
     """--version -> exit 0 + version string."""
     cp = _run("--version")
     assert cp.returncode == 0
-    # Version is something like "0.1.0".
-    assert "0.1" in cp.stdout
+    # Version is something like "0.3.1".
+    assert "0.3.1" in cp.stdout

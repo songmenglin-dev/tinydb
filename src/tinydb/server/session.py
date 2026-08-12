@@ -85,7 +85,7 @@ class ServerSession:
         if isinstance(msg, Quit):
             # Auto-rollback any in-flight transaction.
             self._auto_rollback()
-            return [Ok(version="tinydb-0.3.0").to_frame()]
+            return [Ok(version="tinydb-0.3.1").to_frame()]
         if isinstance(msg, Ping):
             return [Pong(ts=msg.ts).to_frame()]
         # Intercept BEGIN/COMMIT/ROLLBACK before dispatch.

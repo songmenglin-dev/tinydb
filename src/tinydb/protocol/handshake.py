@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from tinydb.protocol.messages import MAX_CLIENT_ID, Hello, Ok
 
-DEFAULT_CLIENT_ID: str = "py-tinydb-0.3.0"
-DEFAULT_SERVER_VERSION: str = "tinydb-0.3.0"
+DEFAULT_CLIENT_ID: str = "py-tinydb-0.3.1"
+DEFAULT_SERVER_VERSION: str = "tinydb-0.3.1"
 
 CLIENT_ID: str = DEFAULT_CLIENT_ID
 SERVER_VERSION: str = DEFAULT_SERVER_VERSION

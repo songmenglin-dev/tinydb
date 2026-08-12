@@ -73,16 +73,16 @@ class TestOkMessage:
     """Ok carries a server version string."""
 
     def test_ok_encode_payload(self):
-        o = Ok(version="tinydb-0.3.0")
+        o = Ok(version="tinydb-0.3.1")
         f = o.to_frame()
         assert f.type == MessageType.OK
-        assert f.payload == b"tinydb-0.3.0"
+        assert f.payload == b"tinydb-0.3.1"
 
     def test_ok_from_frame(self):
-        original = Ok(version="tinydb-0.3.0")
+        original = Ok(version="tinydb-0.3.1")
         f = original.to_frame()
         decoded = Ok.from_frame(f)
-        assert decoded.version == "tinydb-0.3.0"
+        assert decoded.version == "tinydb-0.3.1"
 
 
 class TestErrMessage:

@@ -43,7 +43,7 @@ class TinyConnectionTest {
                             org.tinydb.jdbc.protocol.Frame hello = org.tinydb.jdbc.protocol.Frame.read(in);
                             if (hello != null && hello.getType() == org.tinydb.jdbc.protocol.Codec.TYPE_HELLO) {
                                 // Send OK
-                                byte[] ver = "tinydb-0.3.0".getBytes();
+                                byte[] ver = "tinydb-0.3.1".getBytes();
                                 org.tinydb.jdbc.protocol.Frame okFrame = new org.tinydb.jdbc.protocol.Frame(
                                         ver.length,
                                         org.tinydb.jdbc.protocol.Codec.TYPE_OK,

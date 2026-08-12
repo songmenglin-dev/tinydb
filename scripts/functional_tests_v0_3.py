@@ -227,7 +227,7 @@ def category_wire_protocol(server_db: Path) -> None:
                 "Wire",
                 f"HELLO handshake returns server version={ok.version!r}",
                 ok_frame.type == MessageType.OK and ok.version == DEFAULT_SERVER_VERSION,
-                "HELLO(client='py-tinydb-0.3.0')",
+                "HELLO(client='py-tinydb-0.3.1')",
                 f"type=0x{ok_frame.type:02x} version={ok.version!r}",
             )
 
@@ -569,7 +569,7 @@ def category_network_client(server_db: Path) -> None:
         rec.record(
             "Client",
             f"Client() performs HELLO and reports version={c.version!r}",
-            c.version == "tinydb-0.3.0",
+            c.version == "tinydb-0.3.1",
             "Client('127.0.0.1', 8520)",
             f"version={c.version!r}",
         )
@@ -957,18 +957,18 @@ def category_jdbc_driver(server_db: Path) -> None:
         out, err = proc.stdout, proc.stderr
     rec.record(
         "JDBC",
-        f"mvn package builds tinydb-jdbc-0.3.0.jar (rc={rc})",
+        f"mvn package builds tinydb-jdbc-0.3.1.jar (rc={rc})",
         rc == 0,
         "mvn -f jdbc/pom.xml -DskipTests package",
         (out + err)[-400:] if (out or err) else "ok (silent)",
     )
 
-    jar = jdbc_dir / "target" / "tinydb-jdbc-0.3.0.jar"
+    jar = jdbc_dir / "target" / "tinydb-jdbc-0.3.1.jar"
     if jar.exists():
         size_kb = jar.stat().st_size // 1024
         rec.record(
             "JDBC",
-            f"tinydb-jdbc-0.3.0.jar exists ({size_kb} KB, target <200KB)",
+            f"tinydb-jdbc-0.3.1.jar exists ({size_kb} KB, target <200KB)",
             size_kb < 200,
             f"ls -la {jar}",
             f"{size_kb} KB",
@@ -976,7 +976,7 @@ def category_jdbc_driver(server_db: Path) -> None:
     else:
         rec.record(
             "JDBC",
-            "tinydb-jdbc-0.3.0.jar not produced",
+            "tinydb-jdbc-0.3.1.jar not produced",
             False,
             f"ls -la {jar}",
         )

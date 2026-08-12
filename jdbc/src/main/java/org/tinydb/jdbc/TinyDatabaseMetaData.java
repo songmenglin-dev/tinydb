@@ -532,7 +532,7 @@ public class TinyDatabaseMetaData implements DatabaseMetaData {
 
     @Override
     public String getDriverVersion() throws SQLException {
-        return "0.3.0";
+        return "0.3.1";
     }
 
     @Override

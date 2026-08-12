@@ -55,7 +55,7 @@ public class TinyDriver implements Driver {
             // leaking if the encoder ever throws.
             Frame hello;
             try {
-                hello = Codec.encodeHello("tinydb-jdbc-0.3.0");
+                hello = Codec.encodeHello("tinydb-jdbc-0.3.1");
             } catch (RuntimeException re) {
                 throw new SQLException("handshake encode failed: " + re.getMessage(), "08000", re);
             }

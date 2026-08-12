@@ -79,7 +79,7 @@ class TestClientConnect:
             from tinydb.client.sync import Client
             c = Client("127.0.0.1", port)
             try:
-                assert c.version == "tinydb-0.3.0"
+                assert c.version == "tinydb-0.3.1"
             finally:
                 c.close()
         finally:

@@ -34,10 +34,10 @@ class MessagesTest {
     @Test
     @DisplayName("OK (0x02): server version in payload")
     void testOk() throws Exception {
-        byte[] version = "tinydb-0.3.0".getBytes("UTF-8");
+        byte[] version = "tinydb-0.3.1".getBytes("UTF-8");
         Frame f = new Frame(version.length, Codec.TYPE_OK, (byte) 0, version);
         assertEquals(Codec.TYPE_OK, f.getType());
-        assertEquals("tinydb-0.3.0", Codec.decodeOk(f));
+        assertEquals("tinydb-0.3.1", Codec.decodeOk(f));
     }
 
     @Test

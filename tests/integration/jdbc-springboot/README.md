@@ -1,7 +1,7 @@
 # tinydb-jdbc Spring Boot Integration Test
 
 > A Spring Boot 2.7 + MyBatis application that drives the locally-built
-> `tinydb-jdbc-0.3.0.jar` against a running `tinydb-server` to verify
+> `tinydb-jdbc-0.3.1.jar` against a running `tinydb-server` to verify
 > end-to-end JDBC connectivity through a real ORM and connection pool.
 
 ## Goal
@@ -21,7 +21,7 @@ not just from hand-written Java code. The test exercises:
 ```bash
 # 1. Build the tinydb-jdbc JAR (only needed once, or after touching jdbc/ source)
 cd jdbc && mvn -DskipTests package && cd ..
-#   → produces jdbc/target/tinydb-jdbc-0.3.0.jar
+#   → produces jdbc/target/tinydb-jdbc-0.3.1.jar
 
 # 2. Start a tinydb-server on a free port
 tests/integration/jdbc-springboot/scripts/start-tinydb-server.sh start 18520
@@ -67,14 +67,14 @@ tests/integration/jdbc-springboot/
 
 ### Driver wiring
 
-`tinydb-jdbc-0.3.0.jar` ships its driver under
+`tinydb-jdbc-0.3.1.jar` ships its driver under
 `META-INF/services/java.sql.Driver`, so the JVM picks it up
 automatically. We still set `spring.datasource.driver-class-name`
 explicitly to keep Spring Boot's auto-detection deterministic.
 
 The driver JAR is referenced from the parent project via a Maven
 `<scope>system</scope>` dependency pointing at
-`jdbc/target/tinydb-jdbc-0.3.0.jar`. There's no need to publish the
+`jdbc/target/tinydb-jdbc-0.3.1.jar`. There's no need to publish the
 driver to a Maven repo just to consume it.
 
 ### Column-name resolution (v0.3-COLFIX)
@@ -97,8 +97,8 @@ User findById(@Param("id") Integer id);
 | Java                 | 1.8     |
 | Spring Boot          | 2.7.18  |
 | mybatis-spring-boot-starter | 2.3.1 |
-| tinydb               | 0.3.0   |
-| tinydb-jdbc (driver) | 0.3.0   |
+| tinydb               | 0.3.1   |
+| tinydb-jdbc (driver) | 0.3.1   |
 
 Spring Boot 2.7.x is the most recent line that still supports Java 8
 — required because `tinydb-jdbc` is compiled for `target=1.8`
@@ -140,7 +140,7 @@ that the parser accepts:
 
 ## Issues uncovered while building this test
 
-Setting up the project surfaced three real gaps in `tinydb-jdbc-0.3.0`,
+Setting up the project surfaced three real gaps in `tinydb-jdbc-0.3.1`,
 all fixed in `jdbc/src/main/java/org/tinydb/jdbc/`:
 
 1. **Wire-protocol length field** — Java `Frame.write` was emitting

@@ -249,9 +249,9 @@ class CodecTest {
     @Test
     @DisplayName("OK decode returns version string")
     void testDecodeOk() {
-        byte[] payload = "tinydb-0.3.0".getBytes();
+        byte[] payload = "tinydb-0.3.1".getBytes();
         Frame f = new Frame(payload.length, Codec.TYPE_OK, (byte) 0, payload);
-        assertEquals("tinydb-0.3.0", Codec.decodeOk(f));
+        assertEquals("tinydb-0.3.1", Codec.decodeOk(f));
     }
 
     @Test
